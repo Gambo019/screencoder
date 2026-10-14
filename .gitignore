@@ -1,0 +1,12 @@
+# Python's virtual environment (run.bat creates it on first start)
+.venv/
+
+# Python's compiled cache
+__pycache__/
+*.py[cod]
+
+# Editor and system files
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini

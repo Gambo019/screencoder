@@ -1,0 +1,5 @@
+PySide6>=6.6
+Pygments>=2.15
+sherpa-onnx>=1.12
+numpy
+PyAudioWPatch; sys_platform == "win32"
