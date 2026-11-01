@@ -21,6 +21,8 @@ Double-click `run.bat`. The first run creates `.venv` and installs PySide6. You 
 .venv\Scripts\python -m screencoder
 ```
 
+ScreenCoder runs as a single window: launching it again (double-clicking `run.bat` once more) brings the window you already have to the front instead of opening a second copy.
+
 ## Using it
 
 The window has the question-and-answer panel on the left and the code side on the right (plan, coding activity, files). Drag the divider between them to give either side more room; the position is remembered. The window can be as narrow as about 800 px, and the button rows wrap when a panel gets narrow.
@@ -255,9 +257,21 @@ Settings let you change:
 - the runs folder;
 - whether thinking summaries are shown;
 - the global hotkeys;
-- remote control: on or off, from the internet or from this network only, and its link (see above).
+- remote control: on or off, from the internet or from this network only, and its link (see above);
+- **AI providers** (see below): OpenAI and Anthropic API keys, the OpenAI model list, and which back end coding and quick answers use.
 
-They are saved in `~/ScreenCoder/settings.json`.
+They are saved in `~/ScreenCoder/settings.json`. The API keys are stored there in plain text, like any other setting; keep that file private.
+
+## AI providers
+
+Two parts of the app each pick a back end — **Claude Code (the CLI)**, the **OpenAI API** or the **Anthropic API**:
+
+- **Coding** — the analyze → plan → code agent.
+- **Quick answers** — the ⚡ Ask button.
+
+In Settings, under **AI providers**, enter an OpenAI key and/or an Anthropic key (hidden as you type; **Test** makes one tiny call to check it), edit the **OpenAI models** list to taste, then choose a provider and model for each part. No extra Python package is needed — the API calls go over the app's own networking.
+
+With **OpenAI** or **Anthropic**, that part runs as an agent over the API with the same file tools the Claude Code agent uses — Read, Write, Edit, Glob, Grep and LS — working in your workspace (a copy of it, for a coding task). Running commands and tests (**Bash**) needs the **bypassPermissions** setting, exactly as with Claude Code; otherwise shell commands are refused. Quick answers get read-only tools. How well a run goes depends on the model you choose; Claude Code remains the default and the most capable for coding.
 
 ## Layout
 
@@ -268,10 +282,12 @@ They are saved in `~/ScreenCoder/settings.json`.
 | `screencoder/prompts.py` | Prompts for the coding agent, for the developer who directs an external agent, and for the quick-answer model |
 | `screencoder/attachments.py`, `images.py` | Screenshot encoding within API limits, duplicate detection, message content |
 | `screencoder/capture.py`, `hotkeys.py` | Snipping overlay, full-screen capture, Windows global hotkeys |
-| `screencoder/listener.py` | PC-audio capture (WASAPI loopback) and live streaming speech-to-text (sherpa-onnx) |
+| `screencoder/listener.py` | PC-audio capture (WASAPI loopback) or microphone, and live streaming speech-to-text (sherpa-onnx) |
 | `screencoder/widgets.py` | Composer (paste/drop/attachments) and the live Markdown view |
 | `screencoder/file_tree.py`, `code_view.py` | Explorer tree with status colours; code viewer with line numbers and syntax colours (Pygments) |
 | `screencoder/chat_view.py` | Chat bubbles for the answers panel |
+| `screencoder/llm.py` | Provider helpers (endpoints, keys, model menus) and a one-shot streaming client for the Settings key-test, over Qt networking (no extra package) |
+| `screencoder/api_agent.py` | An agentic coding/quick-answer session over the OpenAI or Anthropic API, shaped as a drop-in for `ClaudeSession` (same signals and tool-block shapes), running the file/Bash tools locally |
 | `screencoder/speech_filter.py` | Skips filler lines ("hmm", "okay"…) in the transcript |
 | `screencoder/remote.py`, `remote_web/` | Remote control: mirrors the app's widgets to a browser page over one WebSocket and applies what is done there. It knows nothing about the app's features, so new ones show up remotely without changes here |
 | `screencoder/tunnel.py` | The internet link for remote control: downloads (once, after asking), checks and runs Cloudflare's `cloudflared`, and reports the public address |

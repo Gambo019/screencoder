@@ -5,15 +5,15 @@ import subprocess
 import sys
 
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel,
-    QLineEdit, QMessageBox, QPushButton, QSpinBox, QVBoxLayout,
+    QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QFrame, QHBoxLayout,
+    QLabel, QLineEdit, QMessageBox, QPushButton, QScrollArea, QSpinBox, QVBoxLayout, QWidget,
 )
 
 from .config import (
     CODING_MODELS, EFFORT_LEVELS, PERMISSION_MODES, SIDE_MODELS, TEXT_SCALES, Settings, find_claude_cli,
 )
 from .listener import DEFAULT_SPEECH_MODEL, SPEECH_MODELS
-from . import tunnel
+from . import llm, tunnel
 from .remote import DEFAULT_PORT, REACH_INTERNET, REACH_LAN, local_addresses, new_key, remote_link
 
 
@@ -59,9 +59,31 @@ class SettingsDialog(QDialog):
         self.cli_status.setWordWrap(True)
         self.cli_status.setStyleSheet("color:#9aa4b2;")
 
-        self.coding_model = _combo(CODING_MODELS, settings.coding_model, editable=True)
+        # API keys for the OpenAI and Anthropic providers (hidden as you type; "Test" makes one tiny call).
+        self.openai_key = QLineEdit(settings.openai_key)
+        self.openai_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.openai_key.setPlaceholderText("sk-...  (only needed if a part uses OpenAI)")
+        self.anthropic_key = QLineEdit(settings.anthropic_key)
+        self.anthropic_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.anthropic_key.setPlaceholderText("sk-ant-...  (only needed if a part uses Anthropic, instead of Claude Code)")
+        self.openai_models_edit = QLineEdit(", ".join(settings.openai_models))
+        self.openai_models_edit.setPlaceholderText("gpt-5, gpt-5-mini, gpt-4.1, ...")
+        self.openai_models_edit.setToolTip("The OpenAI models offered in the menus below. Comma-separated; edit freely.")
+        self.key_status = QLabel()
+        self.key_status.setWordWrap(True)
+        self.key_status.setStyleSheet("color:#9aa4b2;")
+
+        # Each of the three parts picks a provider and a model. The model menu follows the provider.
+        self.coding_provider, self.coding_model = self._provider_pair(settings.coding_provider, settings.coding_model)
+        self.side_provider, self.side_model = self._provider_pair(settings.side_provider, settings.side_model)
+        self.openai_models_edit.textChanged.connect(self._refresh_models)
+        self.coding_note = QLabel()
+        self.coding_note.setWordWrap(True)
+        self.coding_note.setStyleSheet("color:#e3b341;")
+        self.coding_provider.currentIndexChanged.connect(self._update_coding_note)
+        self.side_provider.currentIndexChanged.connect(self._update_coding_note)
+        self._update_coding_note()
         self.coding_effort = _combo(EFFORT_LEVELS, settings.coding_effort)
-        self.side_model = _combo(SIDE_MODELS, settings.side_model, editable=True)
         self.side_effort = _combo(EFFORT_LEVELS, settings.side_effort)
         self.permission = QComboBox()
         for key, label in PERMISSION_MODES.items():
@@ -81,6 +103,12 @@ class SettingsDialog(QDialog):
             "Always on top: keep the window above all other apps (toggle anytime with Ctrl+Alt+Shift+T)"
         )
         self.always_on_top.setChecked(getattr(settings, "always_on_top", False))
+        # Keep these two in step with the real state: the global hotkeys (Ctrl+Alt+Shift+H/T) can flip them
+        # while this dialog is open, and the checkbox should show what is actually in effect.
+        self._stealth_controller = getattr(QApplication.instance(), "_stealth_controller", None)
+        if self._stealth_controller is not None:
+            self._sync_toggles()
+            self._stealth_controller.changed.connect(self._sync_toggles)
         self.runs_dir = QLineEdit(settings.runs_dir)
         self.text_scale = QComboBox()
         for scale in TEXT_SCALES:
@@ -143,10 +171,16 @@ class SettingsDialog(QDialog):
         form = QFormLayout()
         form.addRow("Claude Code CLI", cli_row)
         form.addRow("", self.cli_status)
-        form.addRow("Coding model", self.coding_model)
+        form.addRow(self._heading("AI providers"))
+        form.addRow("OpenAI API key", self._key_row(self.openai_key, llm.OPENAI))
+        form.addRow("Anthropic API key", self._key_row(self.anthropic_key, llm.ANTHROPIC))
+        form.addRow("OpenAI models", self.openai_models_edit)
+        form.addRow("", self.key_status)
+        form.addRow("Coding", self._pair_row(self.coding_provider, self.coding_model))
         form.addRow("Coding effort", self.coding_effort)
-        form.addRow("Quick-answer model", self.side_model)
+        form.addRow("Quick answers (Ask)", self._pair_row(self.side_provider, self.side_model))
         form.addRow("Quick-answer effort", self.side_effort)
+        form.addRow("", self.coding_note)
         form.addRow("Coding permissions", self.permission)
         form.addRow("Runs folder", self.runs_dir)
         form.addRow("Reading text size", self.text_scale)
@@ -172,10 +206,120 @@ class SettingsDialog(QDialog):
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
+        # The dialog has grown; put everything but the buttons in a scroll area so it fits any screen.
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.addLayout(form)
+        content_layout.addWidget(note)
+        content_layout.addStretch(1)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setWidget(content)
         layout = QVBoxLayout(self)
-        layout.addLayout(form)
-        layout.addWidget(note)
+        layout.addWidget(scroll, 1)
         layout.addWidget(buttons)
+        self.resize(720, 720)
+
+    def _provider_pair(self, current_provider: str, current_model: str):
+        """A provider menu paired with a model menu that follows it. Used for each of the three parts."""
+        provider = QComboBox()
+        for name in llm.PROVIDERS:
+            provider.addItem(llm.PROVIDER_LABELS[name], name)
+        provider.setCurrentIndex(llm.PROVIDERS.index(current_provider) if current_provider in llm.PROVIDERS else 0)
+        model = QComboBox()
+        model.setEditable(False)  # only the listed models; edit the OpenAI list via the field above
+        if not hasattr(self, "_model_combos"):
+            self._model_combos = []
+        self._model_combos.append((provider, model))
+        self._fill_models(provider, model, current_model)
+        provider.currentIndexChanged.connect(lambda _i, p=provider, m=model: self._fill_models(p, m, ""))
+        return provider, model
+
+    def _models_for(self, provider: str) -> list:
+        if provider == llm.OPENAI:
+            names = [m.strip() for m in self.openai_models_edit.text().split(",") if m.strip()]
+            return names or llm.OPENAI_MODELS
+        return llm.models_for(provider)
+
+    def _fill_models(self, provider_combo: QComboBox, model_combo: QComboBox, prefer: str) -> None:
+        provider = provider_combo.currentData()
+        keep = prefer or model_combo.currentText()
+        model_combo.blockSignals(True)
+        model_combo.clear()
+        model_combo.addItems(self._models_for(provider))
+        model_combo.setCurrentText(keep or llm.default_model(provider, self.settings))
+        model_combo.blockSignals(False)
+
+    def _refresh_models(self) -> None:
+        for provider_combo, model_combo in getattr(self, "_model_combos", []):
+            if provider_combo.currentData() == llm.OPENAI:
+                self._fill_models(provider_combo, model_combo, model_combo.currentText())
+
+    def _update_coding_note(self, *_args) -> None:
+        other = (self.coding_provider.currentData() != llm.CLAUDE_CODE
+                 or self.side_provider.currentData() != llm.CLAUDE_CODE)
+        self.coding_note.setVisible(other)
+        if other:
+            self.coding_note.setText(
+                "With OpenAI or Anthropic, the part runs as an agent over the API with the same file tools "
+                "(Read/Write/Edit/Glob/Grep) in your workspace. Running commands and tests (Bash) needs the "
+                "bypassPermissions setting below, as with Claude Code. Quality depends on the model you choose.")
+
+    def _key_row(self, edit: QLineEdit, provider: str) -> QHBoxLayout:
+        show = QPushButton("Show")
+        show.setCheckable(True)
+        show.toggled.connect(lambda on: edit.setEchoMode(
+            QLineEdit.EchoMode.Normal if on else QLineEdit.EchoMode.Password))
+        test = QPushButton("Test")
+        test.clicked.connect(lambda: self._test_key(provider))
+        row = QHBoxLayout()
+        row.addWidget(edit, 1)
+        row.addWidget(show)
+        row.addWidget(test)
+        return row
+
+    def _test_key(self, provider: str) -> None:
+        edit = self.openai_key if provider == llm.OPENAI else self.anthropic_key
+        key = edit.text().strip()
+        if not key:
+            self.key_status.setText("Enter a key first, then press Test.")
+            return
+        model = self._models_for(provider)[0]
+        self.key_status.setText(f"Testing the {provider} key with {model}…")
+        client = llm.ChatClient(self)
+
+        def done(ok: bool, why: str = "") -> None:
+            self.key_status.setText(f"✓ The {provider} key works ({model})." if ok else f"✗ {why}")
+            client.deleteLater()
+
+        client.finished.connect(lambda: done(True))
+        client.failed.connect(lambda why: done(False, why))
+        client.send([{"role": "user", "text": "Reply with the single word OK."}],
+                    provider=provider, model=model, api_key=key, max_tokens=16)
+
+    @staticmethod
+    def _pair_row(provider: QComboBox, model: QComboBox) -> QHBoxLayout:
+        row = QHBoxLayout()
+        row.addWidget(provider)
+        row.addWidget(model, 1)
+        return row
+
+    @staticmethod
+    def _heading(text: str) -> QLabel:
+        label = QLabel(text)
+        label.setStyleSheet("color:#e6edf3; font-weight:600; padding-top:8px;")
+        return label
+
+    def _sync_toggles(self, *_args) -> None:
+        controller = self._stealth_controller
+        if controller is None:
+            return
+        for box, state in ((self.stealth, controller.enabled), (self.always_on_top, controller.on_top)):
+            box.blockSignals(True)
+            box.setChecked(bool(state))
+            box.blockSignals(False)
 
     def _browse_cli(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Locate the claude executable")
@@ -222,8 +366,13 @@ class SettingsDialog(QDialog):
     def apply(self) -> None:
         s = self.settings
         s.claude_path = self.cli_edit.text().strip()
+        s.openai_key = self.openai_key.text().strip()
+        s.anthropic_key = self.anthropic_key.text().strip()
+        s.openai_models = [m.strip() for m in self.openai_models_edit.text().split(",") if m.strip()] or s.openai_models
+        s.coding_provider = self.coding_provider.currentData()
         s.coding_model = self.coding_model.currentText().strip() or s.coding_model
         s.coding_effort = self.coding_effort.currentText()
+        s.side_provider = self.side_provider.currentData()
         s.side_model = self.side_model.currentText().strip() or s.side_model
         s.side_effort = self.side_effort.currentText()
         s.permission_mode = self.permission.currentData()

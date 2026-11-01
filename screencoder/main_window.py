@@ -28,6 +28,8 @@ from . import prompts
 from .capture import ScreenCapturer
 from .chat_view import ChatView, MessageBubble
 from .claude_cli import ClaudeSession
+from .api_agent import ApiAgentSession
+from . import llm
 from .code_view import CodeView
 from .config import (
     APP_NAME, HOME_DIR, LANG_NON_CODING, LANGUAGES, Settings, can_run_commands, resolve_claude_cli, supports_effort,
@@ -1147,9 +1149,17 @@ class MainWindow(QMainWindow):
         if self.task.is_empty():
             self._notice("Add a description, screenshots or files first.")
             return
-        claude = self._claude()
-        if not claude:
-            return
+        coding_provider = self.settings.coding_provider
+        if coding_provider == llm.CLAUDE_CODE:
+            claude = self._claude()
+            if not claude:
+                return
+        else:
+            claude = resolve_claude_cli(self.settings)  # may be unused for an API provider
+            ok, why = llm.ready(self.settings, coding_provider)
+            if not ok:
+                QMessageBox.warning(self, APP_NAME, why)
+                return
         if self.main is not None and self.main.running and self.phase in ACTIVE | {Phase.AWAITING}:
             answer = QMessageBox.question(self, APP_NAME, "The coding agent is still working on the current task.\n"
                                                           "Stop it and start the new task?")
@@ -1255,20 +1265,39 @@ class MainWindow(QMainWindow):
                 "tab shows what he edited (M) and added (U), and *Open folder* opens the copy.")
 
         s = self.settings
-        session = ClaudeSession(
-            claude_path=claude,
-            cwd=workspace,
-            model=s.coding_model,
-            effort=s.coding_effort if supports_effort(s.coding_model) else None,
-            # Directing: read-only tools, so there is nothing to write with and nothing to run.
-            permission_mode=None if directing else s.permission_mode,
-            tools="Read,Glob,Grep" if directing else None,
-            add_dirs=[inputs],
-            append_system_prompt=prompts.LEAD_SYSTEM if directing else prompts.MAIN_SYSTEM,
-            name=f"ScreenCoder {run_id}",
-            log_path=run_dir / "events.jsonl",
-            parent=self,
-        )
+        # Directing: read-only tools, so there is nothing to write with and nothing to run.
+        tools = "Read,Glob,Grep" if directing else None
+        permission_mode = None if directing else s.permission_mode
+        system = prompts.LEAD_SYSTEM if directing else prompts.MAIN_SYSTEM
+        if s.coding_provider == llm.CLAUDE_CODE:
+            session = ClaudeSession(
+                claude_path=claude,
+                cwd=workspace,
+                model=s.coding_model,
+                effort=s.coding_effort if supports_effort(s.coding_model) else None,
+                permission_mode=permission_mode,
+                tools=tools,
+                add_dirs=[inputs],
+                append_system_prompt=system,
+                name=f"ScreenCoder {run_id}",
+                log_path=run_dir / "events.jsonl",
+                parent=self,
+            )
+        else:
+            session = ApiAgentSession(
+                provider=s.coding_provider,
+                api_key=llm.key_for(s, s.coding_provider),
+                cwd=workspace,
+                model=s.coding_model,
+                tools=tools,
+                add_dirs=[inputs],
+                append_system_prompt=system,
+                permission_mode=permission_mode,
+                can_run=(not directing) and can_run_commands(s.permission_mode),
+                name=f"ScreenCoder {run_id}",
+                log_path=run_dir / "events.jsonl",
+                parent=self,
+            )
         self.main = session
         g = lambda fn: self._guard(session, fn)  # noqa: E731
         session.initialized.connect(g(self._main_init))
@@ -2178,14 +2207,18 @@ class MainWindow(QMainWindow):
         self._retire_side()
         self._ensure_side()
 
-    def _ensure_side(self) -> ClaudeSession | None:
+    def _ensure_side(self):
         s = self.settings
-        if self.side is not None and self.side.running and self.side.model == s.side_model:
+        provider = s.side_provider
+        if (self.side is not None and self.side.running and self.side.model == s.side_model
+                and getattr(self.side, "provider", llm.CLAUDE_CODE) == provider):
             return self.side
         self._retire_side()
         claude = resolve_claude_cli(s)
-        if not claude:
+        if provider == llm.CLAUDE_CODE and not claude:
             return None
+        if provider != llm.CLAUDE_CODE and not llm.ready(s, provider)[0]:
+            return None  # the chosen API has no key; ask_side falls back to telling the user
         if self.run:
             # With a folder given by the user, questions are answered from that folder - it is what the person
             # asking sees - and not from the developer's copy, which may be ahead of it.
@@ -2194,19 +2227,34 @@ class MainWindow(QMainWindow):
             cwd, add_dirs = (Path(s.runs_dir).expanduser() / "scratch"), []
             cwd.mkdir(parents=True, exist_ok=True)
             cwd = cwd.resolve()
-        side = ClaudeSession(
-            claude_path=claude,
-            cwd=cwd,
-            model=s.side_model,
-            effort=s.side_effort if supports_effort(s.side_model) else None,
-            tools="Read,Glob,Grep",
-            add_dirs=add_dirs,
-            append_system_prompt=(prompts.LEAD_SIDE_SYSTEM if self._directing() else
-                                  prompts.SIDE_SYSTEM_GIVEN if self.run and self.run.given else prompts.SIDE_SYSTEM),
-            log_path=self.run.dir / "quick_answers.jsonl" if self.run else None,  # what it was sent and said
-            persist=False,
-            parent=self,
-        )
+        system = (prompts.LEAD_SIDE_SYSTEM if self._directing() else
+                  prompts.SIDE_SYSTEM_GIVEN if self.run and self.run.given else prompts.SIDE_SYSTEM)
+        log_path = self.run.dir / "quick_answers.jsonl" if self.run else None
+        if provider == llm.CLAUDE_CODE:
+            side = ClaudeSession(
+                claude_path=claude,
+                cwd=cwd,
+                model=s.side_model,
+                effort=s.side_effort if supports_effort(s.side_model) else None,
+                tools="Read,Glob,Grep",
+                add_dirs=add_dirs,
+                append_system_prompt=system,
+                log_path=log_path,  # what it was sent and said
+                persist=False,
+                parent=self,
+            )
+        else:
+            side = ApiAgentSession(
+                provider=provider,
+                api_key=llm.key_for(s, provider),
+                cwd=cwd,
+                model=s.side_model,
+                tools="Read,Glob,Grep",  # read-only: the quick answer can look at the workspace, not change it
+                add_dirs=add_dirs,
+                append_system_prompt=system,
+                log_path=log_path,
+                parent=self,
+            )
 
         def guarded(fn):
             def handler(*args):
@@ -2268,7 +2316,10 @@ class MainWindow(QMainWindow):
             return
         side = self._ensure_side()
         if side is None:
-            self._claude()
+            if self.settings.side_provider != llm.CLAUDE_CODE:
+                self._notice(llm.ready(self.settings, self.settings.side_provider)[1])
+            else:
+                self._claude()
             return
         text, attachments = self.ask.take()
         self._questions += 1

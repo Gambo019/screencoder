@@ -66,6 +66,13 @@ class Settings:
     speech_model: str = "kroko"
     runs_dir: str = str(HOME_DIR / "runs")
     workspace: str = ""
+    # LLM providers. Coding and the quick-answer (Ask) part each pick a back end: "claude-code" (the CLI),
+    # "openai" or "anthropic" (their APIs, with the keys below). See llm.py.
+    openai_key: str = ""
+    anthropic_key: str = ""
+    openai_models: list = field(default_factory=lambda: ["gpt-5", "gpt-5-mini", "gpt-4.1", "gpt-4.1-mini", "gpt-4o"])
+    coding_provider: str = "claude-code"
+    side_provider: str = "claude-code"       # the quick-answer part (the Ask button)
 
     @classmethod
     def load(cls) -> "Settings":

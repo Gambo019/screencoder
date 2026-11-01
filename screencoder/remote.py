@@ -1026,7 +1026,11 @@ class Mirror(QObject):
     def _rows(self, view, model) -> tuple[list, list]:
         rows, index, tree = [], [], isinstance(view, QTreeView)
         root = view.rootIndex()
-        columns = [c for c in range(model.columnCount(root))
+        try:
+            column_count = model.columnCount(root)
+        except TypeError:  # a QListWidget's model makes columnCount(parent) private (PySide6 6.12) - lists are 1 column
+            column_count = 1
+        columns = [c for c in range(column_count)
                    if not (isinstance(view, (QTreeView, QTableView)) and view.isColumnHidden(c))][:8] or [0]
         current, selection = view.currentIndex(), view.selectionModel()
         display, foreground = Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.ForegroundRole

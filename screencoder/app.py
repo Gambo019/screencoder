@@ -71,10 +71,19 @@ def main() -> int:
     app.setPalette(_dark_palette())
     app.setStyleSheet(STYLE)
 
+    # One copy per user: if ScreenCoder is already running, bring that window to the front and exit instead of
+    # opening a second window. Checked before the (heavy) main window is built so a second launch bows out fast.
+    from .single_instance import SingleInstance
+
+    instance = SingleInstance(app)
+    if not instance.claim():
+        return 0
+
     from .main_window import MainWindow
 
     window = MainWindow(app)
     window.show()
+    instance.bind(window)
     closer = _QuitWhenClosed(app)
     window.installEventFilter(closer)
 

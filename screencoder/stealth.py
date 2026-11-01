@@ -8,14 +8,28 @@ This module is self-contained: it attaches to the main window from the outside
 does not touch or depend on anything inside the window's own code.
 
   * Screen-capture exclusion -- SetWindowDisplayAffinity(hwnd,
-    WDA_EXCLUDEFROMCAPTURE) on every top-level window, so dialogs and popups are
-    covered too. Falls back to WDA_MONITOR before Windows 10 version 2004.
+    WDA_EXCLUDEFROMCAPTURE). A Qt window is stamped the moment it is shown (an
+    app-wide event filter); native windows Qt does not wrap -- a combo popup's
+    drop-shadow window, a native dialog, a transient frame on a flag change --
+    are caught by a short repeating sweep over the process's own windows while
+    stealth is on. File/colour dialogs are forced to Qt's own (non-native) ones
+    while stealth is on, so they are stamped instantly instead of leaking.
+    Falls back to WDA_MONITOR before Windows 10 version 2004.
   * Taskbar / Alt+Tab -- the Qt.Tool flag (Win32 WS_EX_TOOLWINDOW) on the main
     window. Changing a window's flags recreates its native handle, so the
     capture affinity is re-applied to the new handle afterwards.
+  * Always-on-top -- a pure Win32 z-order change (SetWindowPos HWND_TOPMOST /
+    HWND_NOTOPMOST), NOT the Qt WindowStaysOnTopHint flag: toggling that flag
+    goes through setWindowFlags, which hides and re-shows the same native
+    window, and a capture-excluded window that is hidden then re-shown returns
+    as a solid rectangle in a screen share (a stale compositor surface). A
+    z-order change leaves the live surface alone. Open dialogs are moved into
+    the same band so Settings stays above the main window, not adrift.
   * Global hotkey -- RegisterHotKey on the app thread, caught by a native event
     filter, so it fires whatever app has focus and survives the main window
     being recreated by the flag change.
+  * Dialogs stay owned by the main window even while it is a Qt.Tool window, which
+    Qt 6.12 stopped doing itself: they stay above it and off the taskbar.
 
 Deliberately NOT attempted: hiding the process from Task Manager. That needs
 rootkit-style kernel/hooking techniques, is blocked on modern Windows, and is
@@ -25,9 +39,11 @@ and screen sharing.
 """
 from __future__ import annotations
 
+import os
 import sys
 
-from PySide6.QtCore import QAbstractNativeEventFilter, QEvent, QObject, Qt
+import shiboken6
+from PySide6.QtCore import QAbstractNativeEventFilter, QCoreApplication, QEvent, QObject, Qt, QTimer, Signal
 from PySide6.QtWidgets import QWidget
 
 from .config import Settings
@@ -57,6 +73,33 @@ if _IS_WIN:
     _user32.RegisterHotKey.restype = wintypes.BOOL
     _user32.UnregisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int]
     _user32.UnregisterHotKey.restype = wintypes.BOOL
+    _user32.GetWindow.argtypes = [wintypes.HWND, wintypes.UINT]
+    _user32.GetWindow.restype = wintypes.HWND
+    _user32.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
+    _user32.GetWindowLongW.restype = ctypes.c_long
+    _user32.SetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_ssize_t]
+    _user32.SetWindowLongPtrW.restype = ctypes.c_ssize_t
+    _user32.SetWindowPos.argtypes = [wintypes.HWND, ctypes.c_ssize_t, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                                     ctypes.c_int, wintypes.UINT]
+    _user32.SetWindowPos.restype = wintypes.BOOL
+    _user32.EnumWindows.argtypes = [ctypes.c_void_p, wintypes.LPARAM]
+    _user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    _user32.IsWindowVisible.argtypes = [wintypes.HWND]
+    _ENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    _user32.SetWinEventHook.restype = wintypes.HANDLE
+    _user32.SetWinEventHook.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.HMODULE, ctypes.c_void_p,
+                                        wintypes.DWORD, wintypes.DWORD, wintypes.DWORD]
+    _user32.UnhookWinEvent.argtypes = [wintypes.HANDLE]
+    _WINEVENTPROC = ctypes.WINFUNCTYPE(None, wintypes.HANDLE, wintypes.DWORD, wintypes.HWND, wintypes.LONG,
+                                       wintypes.LONG, wintypes.DWORD, wintypes.DWORD)
+    _EVENT_OBJECT_SHOW = 0x8002
+    _WINEVENT_OUTOFCONTEXT = 0x0000
+    _OBJID_WINDOW = 0
+
+# Window ownership (see _keep_owned).
+_GW_OWNER, _GWLP_HWNDPARENT, _GWL_EXSTYLE, _WS_EX_TOPMOST = 4, -8, -20, 0x8
+_HWND_TOP, _HWND_TOPMOST, _HWND_NOTOPMOST = 0, -1, -2
+_SWP_NOSIZE, _SWP_NOMOVE, _SWP_NOACTIVATE = 0x1, 0x2, 0x10
 
 
 def _exclude_supported() -> bool:
@@ -75,9 +118,46 @@ def _capture_affinity(on: bool) -> int:
 def _apply_affinity(hwnd: int, affinity: int) -> None:
     if not _IS_WIN or not hwnd:
         return
-    ok = _user32.SetWindowDisplayAffinity(wintypes.HWND(hwnd), wintypes.DWORD(affinity))
-    if not ok and affinity == WDA_EXCLUDEFROMCAPTURE:
-        _user32.SetWindowDisplayAffinity(wintypes.HWND(hwnd), wintypes.DWORD(WDA_MONITOR))
+    # No WDA_MONITOR fallback on Windows that supports WDA_EXCLUDEFROMCAPTURE: that fallback turned a momentary
+    # failure (e.g. stamping a popup the instant it is shown) into a persistent BLACK BOX in captures. If the
+    # EXCLUDE call does not take this time, the repeating sweep and the show-hook retry it until it does, which
+    # leaves at worst a brief flash instead of a black rectangle. WDA_MONITOR is used only as the chosen
+    # affinity itself on pre-2004 Windows, where EXCLUDE is unavailable (see _capture_affinity).
+    _user32.SetWindowDisplayAffinity(wintypes.HWND(hwnd), wintypes.DWORD(affinity))
+
+
+def _process_windows() -> list:
+    """Every visible top-level window owned by this process, by raw HWND. Includes native windows Qt does not
+    wrap (a popup's drop-shadow window, a native file dialog), which is why we enumerate instead of asking Qt."""
+    if not _IS_WIN:
+        return []
+    mine, found = os.getpid(), []
+
+    def visit(hwnd, _lparam):
+        pid = wintypes.DWORD()
+        _user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if pid.value == mine and _user32.IsWindowVisible(hwnd):
+            found.append(hwnd)
+        return True
+
+    _user32.EnumWindows(_ENUMPROC(visit), 0)
+    return found
+
+
+def _keep_owned(hwnd: int, owner: int) -> None:
+    """Make `owner` the owner of the dialog window `hwnd`, if Qt left it without one.
+
+    Windows keeps an owned window above its owner (and topmost while the owner is), and gives it no taskbar
+    button. Qt 6.12 no longer makes a Qt.Tool window, which stealth mode turns the main window into, the
+    owner of its dialogs: they came up unowned, under an always-on-top main window that their being open
+    had locked, so nothing could be clicked. Qt 6.11 did this itself; a window it already owns is left alone.
+    """
+    if not _IS_WIN or not hwnd or not owner or hwnd == owner or _user32.GetWindow(hwnd, _GW_OWNER):
+        return
+    _user32.SetWindowLongPtrW(hwnd, _GWLP_HWNDPARENT, owner)
+    topmost = _user32.GetWindowLongW(owner, _GWL_EXSTYLE) & _WS_EX_TOPMOST
+    _user32.SetWindowPos(hwnd, _HWND_TOPMOST if topmost else _HWND_TOP, 0, 0, 0, 0,
+                         _SWP_NOMOVE | _SWP_NOSIZE | _SWP_NOACTIVATE)
 
 
 class _HotkeyFilter(QAbstractNativeEventFilter):
@@ -98,6 +178,8 @@ class _HotkeyFilter(QAbstractNativeEventFilter):
 
 
 class StealthController(QObject):
+    changed = Signal()  # stealth or always-on-top was toggled (so an open Settings dialog can follow)
+
     def __init__(self, app, window, settings: Settings) -> None:
         super().__init__(app)
         self._app = app
@@ -109,6 +191,20 @@ class StealthController(QObject):
         self._applied_flags = None
 
         app.installEventFilter(self)  # re-stamp affinity on every window as it is shown
+        # A short repeating sweep stamps native windows the Qt event filter never sees (a popup's drop shadow,
+        # a native dialog, a transient frame while flags change). It runs only while stealth is on.
+        self._sweep = QTimer(self)
+        self._sweep.setInterval(150)
+        self._sweep.timeout.connect(self._sweep_native)
+        # The fast path: Windows tells us the moment ANY of our windows is shown (before it is composited), so a
+        # popup, its native drop shadow, or a dialog is stamped with no visible flash - even on the 2nd open, when
+        # the Qt-level Show event may not fire. The periodic sweep above is just a backstop.
+        self._winhook = None
+        self._winhook_cb = None
+        if _IS_WIN:
+            self._winhook_cb = _WINEVENTPROC(self._on_window_shown)
+            self._winhook = _user32.SetWinEventHook(_EVENT_OBJECT_SHOW, _EVENT_OBJECT_SHOW, None,
+                                                    self._winhook_cb, os.getpid(), 0, _WINEVENT_OUTOFCONTEXT)
 
         self._hotkey_filter = _HotkeyFilter({
             _HOTKEY_ID: self.toggle,
@@ -144,7 +240,39 @@ class StealthController(QObject):
     def eventFilter(self, obj: QObject, event: QEvent) -> bool:  # noqa: N802 (Qt override)
         if event.type() == QEvent.Type.Show and isinstance(obj, QWidget) and obj.isWindow():
             _apply_affinity(int(obj.winId()), _capture_affinity(self._on))
+            self._own(obj)
+            if self._on:
+                # A Qt window often brings a native drop-shadow window with it a tick later; stamp the whole
+                # process's windows on the next turn so the shadow never shows in a capture.
+                QTimer.singleShot(0, self._sweep_native)
+        elif (event.type() == QEvent.Type.Hide and self._on and isinstance(obj, QWidget) and obj.isWindow()
+              and obj is not self._window and obj.windowType() == Qt.WindowType.Popup):
+            # A hidden-then-reshown popup (combo list, menu) keeps the SAME native window, whose DWM surface a
+            # screen capture renders BLACK on the 2nd open even though it is excluded. Destroying the native
+            # window on hide makes Qt build a fresh one next time, which captures correctly (like the 1st open).
+            def kill(w=obj):
+                if shiboken6.isValid(w) and not w.isVisible():
+                    w.destroy()
+            QTimer.singleShot(0, kill)
         return False
+
+    def _own(self, window: QWidget) -> None:
+        """A dialog of the app stays owned by the window it belongs to (see _keep_owned)."""
+        parent = window.parentWidget()
+        if window is self._window or parent is None:
+            return  # the main window, or a window meant to stand on its own
+        if window.windowType() in (Qt.WindowType.Popup, Qt.WindowType.ToolTip, Qt.WindowType.SplashScreen):
+            return  # menus and tips: Qt keeps those on top itself
+        owner = parent.window()
+        if not owner.isVisible():
+            return  # never ask a hidden window for its handle (see _apply)
+
+        def own() -> None:
+            if shiboken6.isValid(window) and shiboken6.isValid(owner) and window.isVisible() and owner.isVisible():
+                _keep_owned(int(window.winId()), int(owner.winId()))
+
+        own()                       # the Show event comes just before the window is put on screen
+        QTimer.singleShot(0, own)   # and again just after, in case showing it reset the owner
 
     def toggle(self) -> None:
         self.set_stealth(not self._on, persist=True)
@@ -154,6 +282,7 @@ class StealthController(QObject):
         self._apply()
         if persist:
             self._persist()
+        self.changed.emit()
 
     def toggle_on_top(self) -> None:
         self.set_on_top(not self._on_top, persist=True)
@@ -163,21 +292,24 @@ class StealthController(QObject):
         self._apply()
         if persist:
             self._persist()
+        self.changed.emit()
 
     def _apply(self, initial: bool = False) -> None:
         w = self._window
-        # Compute the whole window-flag set from the untouched base so stealth
-        # (Tool => WS_EX_TOOLWINDOW) and always-on-top (WindowStaysOnTopHint =>
-        # WS_EX_TOPMOST) are applied in a single rebuild. The window TYPE is a
-        # masked enum, so swap only those bits; the hint is a separate bit.
+        # Compute the window-flag set from the untouched base. Only the window TYPE changes here (Tool =>
+        # WS_EX_TOOLWINDOW for stealth); it is a masked enum, so swap just those bits. Always-on-top is applied
+        # separately, as a Win32 z-order change in _apply_on_top (see just below).
         wt = Qt.WindowType
         type_mask = int(wt.WindowType_Mask)
         flags = self._base_flags & ~type_mask
         flags |= int(wt.Tool) if self._on else int(wt.Window)
-        if self._on_top:
+        # Always-on-top is applied with a Win32 z-order change (_apply_on_top), not this flag: on Windows,
+        # toggling WindowStaysOnTopHint rebuilds/re-shows the native window, which turns a capture-excluded
+        # window into a visible rectangle in a screen share. Other platforms have no such exclusion, so there
+        # the flag is the simplest way.
+        flags &= ~int(wt.WindowStaysOnTopHint)
+        if self._on_top and not _IS_WIN:
             flags |= int(wt.WindowStaysOnTopHint)
-        else:
-            flags &= ~int(wt.WindowStaysOnTopHint)
 
         # Changing flags recreates the native window AND hides it, so capture
         # visibility first and re-show; the Show handler re-stamps the affinity.
@@ -190,10 +322,22 @@ class StealthController(QObject):
             w.setAttribute(Qt.WidgetAttribute.WA_QuitOnClose, True)
             w.restoreGeometry(geo)
             if was_visible:
+                # Stamp the brand-new native handle BEFORE it is shown, so no frame of the recreated window
+                # (its border or drop shadow) is ever composited without the capture-exclusion flag.
+                _apply_affinity(int(w.winId()), _capture_affinity(self._on))
                 w.show()
                 w.raise_()
                 w.activateWindow()
             self._applied_flags = flags
+
+        # While stealth is on, use Qt's own file/colour dialogs, not the OS ones: a native dialog is a separate
+        # window this app cannot hide from capture, while a Qt dialog is stamped the moment it is shown.
+        QCoreApplication.setAttribute(Qt.ApplicationAttribute.AA_DontUseNativeDialogs, self._on)
+        if self._on:
+            if not self._sweep.isActive():
+                self._sweep.start()
+        else:
+            self._sweep.stop()
 
         # Capture exclusion on the (possibly new) main-window handle and every
         # other open top-level window.
@@ -202,9 +346,57 @@ class StealthController(QObject):
         # call), and Windows can bring such a window back on screen blank. A window shown later is stamped by
         # the Show handler above.
         aff = _capture_affinity(self._on)
-        for top in self._app.topLevelWidgets():
-            if top.isWindow() and top.isVisible():
-                _apply_affinity(int(top.winId()), aff)
+        for hwnd in _process_windows():
+            _apply_affinity(hwnd, aff)
+
+        # Put the window in or out of the always-on-top band, and re-settle its open dialogs.
+        self._apply_on_top()
+
+    def _apply_on_top(self) -> None:
+        """Move the main window into or out of the always-on-top band with a pure z-order change -- no window
+        flag, so its capture-excluded surface is never torn down (see the module docstring) -- then keep any
+        open dialog owned by it, stacked above it, and in the same band."""
+        if not _IS_WIN or not self._window.isVisible():
+            return
+        owner = int(self._window.winId())
+        _user32.SetWindowPos(owner, _HWND_TOPMOST if self._on_top else _HWND_NOTOPMOST, 0, 0, 0, 0,
+                             _SWP_NOMOVE | _SWP_NOSIZE | _SWP_NOACTIVATE)
+        self._reown_dialogs(owner)
+
+    def _reown_dialogs(self, owner: int) -> None:
+        """Keep every open dialog of the app owned by the main window, above it, and in its topmost band.
+        A dialog is settled once when shown (see _own), but the main window's topmost state can be toggled
+        (Ctrl+Alt+Shift+T) or its native handle rebuilt (stealth toggle) while a dialog is open; an owned
+        window left in the wrong band floats above everything (the user saw Settings stuck on top) or sinks
+        behind the main window instead of staying on it."""
+        if not _IS_WIN:
+            return
+        pos = _HWND_TOPMOST if self._on_top else _HWND_NOTOPMOST
+        for w in self._app.topLevelWidgets():
+            if w is self._window or not w.isVisible():
+                continue
+            parent = w.parentWidget()
+            if parent is None or parent.window() is not self._window:
+                continue
+            if w.windowType() in (Qt.WindowType.Popup, Qt.WindowType.ToolTip, Qt.WindowType.SplashScreen):
+                continue
+            hwnd = int(w.winId())
+            _user32.SetWindowLongPtrW(hwnd, _GWLP_HWNDPARENT, owner)
+            _user32.SetWindowPos(hwnd, pos, 0, 0, 0, 0, _SWP_NOMOVE | _SWP_NOSIZE | _SWP_NOACTIVATE)
+
+    def _on_window_shown(self, _hook, _event, hwnd, id_object, _id_child, _thread, _time) -> None:
+        # Called by Windows (our process only) when a window is shown. Stamp it at once while stealth is on,
+        # and strip the saved-bits/shadow class styles that make a reopened popup a black box in a capture.
+        if self._on and id_object == _OBJID_WINDOW and hwnd:
+            _apply_affinity(int(hwnd), _capture_affinity(True))
+
+    def _sweep_native(self) -> None:
+        if not (_IS_WIN and self._on):
+            self._sweep.stop()
+            return
+        aff = _capture_affinity(True)
+        for hwnd in _process_windows():
+            _apply_affinity(hwnd, aff)
 
     def _persist(self) -> None:
         # Write the flags we own, re-loading first so a concurrent change
@@ -224,6 +416,9 @@ class StealthController(QObject):
         if _IS_WIN and self._hotkey_top_ok:
             _user32.UnregisterHotKey(None, _HOTKEY_TOP_ID)
             self._hotkey_top_ok = False
+        if _IS_WIN and self._winhook:
+            _user32.UnhookWinEvent(self._winhook)
+            self._winhook = None
 
 
 def install_stealth(app, window) -> StealthController:
