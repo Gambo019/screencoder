@@ -77,6 +77,8 @@ CANVAS_GAP = 0.07         # seconds between two pictures of a self-painted widge
 CANVAS_WAIT = 1.5         # the longest the next picture waits for viewers to say they have the last one
 SNIP_WIDTH = 1920         # a region picker's screenshot is sent at most this wide (it is only there to aim at)
 SNIP_QUALITY = 70         # as WebP: half the size of a JPEG that reads as well
+SHOT_WIDTH = 960          # a monitor's picture on the map of the monitors: enough to tell the windows apart
+SHOT_QUALITY = 60
 CODE_GAP = 0.5            # seconds between two readings of a code view that only repainted
 DELTA_FROM = 200          # texts longer than this are sent as "what differs", not whole
 ROW_CAP = 2000            # rows of a list or tree that are mirrored
@@ -112,7 +114,7 @@ _BUTTONS = {0: Qt.MouseButton.LeftButton, 1: Qt.MouseButton.MiddleButton, 2: Qt.
 _MOUSE = {0: _E.MouseButtonPress, 1: _E.MouseMove, 2: _E.MouseButtonRelease, 3: _E.MouseButtonDblClick}
 _DRAG = 4  # a whole drag in one message: pressed at one point, let go at another
 # What a viewer may ask for. Those in _PASSIVE also work on a widget that is switched off.
-_OPS = frozenset("c t k s e v r a d m x q n b i g y w file post".split())
+_OPS = frozenset("c t k s e v r a d m x q n b i g y w h file post".split())
 _PASSIVE = frozenset(("q", "a", "file", "y"))
 
 
@@ -344,12 +346,13 @@ def _monitor_box(screen) -> list[int]:
     return [box.x(), box.y(), round(box.width() * ratio), round(box.height() * ratio)]
 
 
-def _monitor_at(x: int, y: int):
-    """The monitor a physical point is on, or the nearest one."""
-    def away(screen) -> int:
+def _monitor_at(x: int, y: int, otherwise):
+    """The monitor a physical point is on, or `otherwise` if it is on none."""
+    for screen in QApplication.screens():
         left, top, width, height = _monitor_box(screen)
-        return max(left - x, x - left - width + 1, 0) + max(top - y, y - top - height + 1, 0)
-    return min(QApplication.screens(), key=away)
+        if left <= x < left + width and top <= y < top + height:
+            return screen
+    return otherwise
 
 
 def _data_url(image: QImage, quality: int = 82, lossy_kind: str = "jpeg") -> str:
@@ -1454,6 +1457,9 @@ class Mirror(QObject):
                 self._dirty.add(node.id)
                 self._kick()
             return
+        if op == "h":  # looks at the screen, not at the app: a dialog open in the app is no reason to refuse
+            self._shots(client)
+            return
         if not self._reachable(w) or (op not in _PASSIVE and not w.isEnabled()):
             return
         getattr(self, "_c_" + op)(client, node, w, message)
@@ -1671,7 +1677,8 @@ class Mirror(QObject):
         if w is not self._window:
             return
         x, y, width, height = [int(value) for value in message[2:6]]
-        screen = _monitor_at(x + width // 2, y + height // 2)
+        # Going by the middle of the window, as Qt does; off every monitor it goes on measuring by the last one it was on.
+        screen = _monitor_at(x + width // 2, y + height // 2, w.screen())
         corner, ratio = screen.geometry().topLeft(), screen.devicePixelRatio()
         if w.isMaximized() or w.isFullScreen():
             w.showNormal()  # the map shows a normal window from here on; a minimized one stays down and comes back there
@@ -1680,6 +1687,18 @@ class Mirror(QObject):
                       round(corner.y() + (y - corner.y()) / ratio) + inner.y() - frame.y(),
                       round(width / ratio) - frame.width() + inner.width(),
                       round(height / ratio) - frame.height() + inner.height())
+
+    def _shots(self, client) -> None:
+        """One picture of each monitor, for the viewer who asked: to see the app among the other windows. A window
+        in stealth mode is not in them, so they show what lies under it."""
+        pictures = []
+        for screen in QApplication.screens():
+            image = screen.grabWindow(0).toImage()
+            if image.width() > SHOT_WIDTH:
+                image = image.scaledToWidth(SHOT_WIDTH, Qt.TransformationMode.SmoothTransformation)
+            image = image.convertToFormat(QImage.Format.Format_RGB32)  # no alpha, or it would travel as a large PNG
+            pictures.append("" if image.isNull() else _data_url(image, SHOT_QUALITY, "webp"))
+        self._send(["H", pictures], only=client)
 
     def _c_g(self, client, node, w, message) -> None:
         """A viewer wants the screenshot of a picker that was not sent unasked (another monitor's)."""

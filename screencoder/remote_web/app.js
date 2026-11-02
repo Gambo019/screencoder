@@ -8,6 +8,8 @@ const SCROLL_MS = 40;    // scrolling or dragging is passed on to the app this o
 const HAND_MS = 200;     // a scroll this soon after the wheel, a finger or a key is the viewer's own
 const QUIET_MS = 700;    // what the app says about a view this soon after the viewer scrolled it is that scroll coming back
 const MAP_HIGH = 240;    // the most height the map of the monitors takes up
+const MAP_ROOM = 0.15;   // room left around the monitors on the map, as a share of their height
+const SHOT_WAIT_MS = 10000;  // the longest the Screenshot button stays busy if no answer comes
 const LEAF = new Set(['btn', 'chk', 'lbl', 'edit', 'text', 'combo', 'num', 'prog', 'busy', 'canvas']);
 const RIGID = new Set(['btn', 'chk', 'combo', 'num', 'busy', 'prog']);  // never squeezed narrower than they are
 const MONO = /mono|consol|courier|cascadia|menlo|fixed/i;
@@ -129,6 +131,7 @@ function onMessage(ev) {
     const ms = performance.now() - m[1];
     state(ms < 10 ? ms.toFixed(1) + ' ms' : Math.round(ms) + ' ms', true);
   } else if (m[0] === 'V') settle(m[1], m[2], m[3]);
+  else if (m[0] === 'H') gotShots(m[1]);
   else if (m[0] === 'A') { const n = N.get(m[1]); if (n) n.ack = Math.max(n.ack || 0, m[2]); }
   else if (m[0] === 'M') snipAnswer(m[2]);
 }
@@ -1252,8 +1255,9 @@ function placeRoots() {
 
 const mapEl = document.getElementById('map'), mapBtn = document.getElementById('mapbtn');
 const mapInfo = document.getElementById('mapinfo'), mapStage = document.getElementById('mapstage');
-const mapWin = $('div');
-const wm = {node: null, geo: null, scale: 1, pad: 0, left: 0, top: 0, right: 0, bottom: 0, drawn: '', drag: null, sending: 0, done: 0};
+const mapShot = document.getElementById('mapshot'), mapWin = $('div');
+const wm = {node: null, geo: null, scale: 1, pad: 0, left: 0, top: 0, drawn: '', drag: null, sending: 0, done: 0,
+  monitors: '', shots: null, shotAt: '', asking: 0};
 mapWin.id = 'mapwin';
 for (const edge of ['n', 'e', 's', 'w', 'ne', 'nw', 'se', 'sw']) {
   const handle = $('div', 'map-h');
@@ -1279,19 +1283,27 @@ function mapSpot(el, r) {
 function drawMap() {
   const g = wm.geo;
   if (!g || mapEl.classList.contains('hid')) return;
-  const wide = mapStage.clientWidth, drawn = JSON.stringify(g.m) + wide;
-  if (drawn !== wm.drawn) {  // and only then: taking the window off the map would end a drag
+  if (wm.drag) { drawWin(); return; }  // the map holds still under the pointer; it is fitted again after the drop
+  const wide = mapStage.clientWidth, r = g.r, monitors = JSON.stringify(g.m);
+  if (monitors !== wm.monitors) { wm.monitors = monitors; wm.shots = null; }  // the pictures show how they were
+  const left = Math.min(...g.m.map(s => s[0])), top = Math.min(...g.m.map(s => s[1]));
+  const right = Math.max(...g.m.map(s => s[0] + s[2])), bottom = Math.max(...g.m.map(s => s[1] + s[3]));
+  const room = (bottom - top) * MAP_ROOM;
+  // Windows lets a window lie past the monitors, even entirely. The map always shows it, so it can be fetched back.
+  wm.left = Math.min(left - room, r[0]);
+  wm.top = Math.min(top - room, r[1]);
+  const high = Math.max(bottom + room, r[1] + r[3]) - wm.top, long = Math.max(right + room, r[0] + r[2]) - wm.left;
+  const drawn = JSON.stringify([monitors, wm.left, wm.top, long, high, wide, wm.shotAt]);
+  if (drawn !== wm.drawn) {
     wm.drawn = drawn;
-    wm.left = Math.min(...g.m.map(s => s[0]));
-    wm.top = Math.min(...g.m.map(s => s[1]));
-    wm.right = Math.max(...g.m.map(s => s[0] + s[2]));
-    wm.bottom = Math.max(...g.m.map(s => s[1] + s[3]));
-    wm.scale = Math.min(wide / (wm.right - wm.left), MAP_HIGH / (wm.bottom - wm.top));
-    wm.pad = (wide - (wm.right - wm.left) * wm.scale) / 2;
-    mapStage.style.height = Math.round((wm.bottom - wm.top) * wm.scale) + 'px';
+    wm.scale = Math.min(wide / long, MAP_HIGH / high);
+    wm.pad = (wide - long * wm.scale) / 2;
+    mapStage.style.height = Math.round(high * wm.scale) + 'px';
     mapStage.replaceChildren(...g.m.map((s, i) => {
-      const tile = $('div', 'map-scr' + (s[4] ? ' pri' : ''));
-      tile.textContent = `${i + 1}  ·  ${s[2]} × ${s[3]}`;
+      const tile = $('div', 'map-scr' + (s[4] ? ' pri' : '')), label = $('span');
+      label.textContent = `${i + 1}  ·  ${s[2]} × ${s[3]}` + (wm.shots ? `  ·  ${wm.shotAt}` : '');
+      if (wm.shots && wm.shots[i]) { const pic = $('img'); pic.src = wm.shots[i]; pic.draggable = false; tile.append(pic); }
+      tile.append(label);
       mapSpot(tile, s);
       return tile;
     }), mapWin);
@@ -1303,26 +1315,41 @@ function drawWin() {
   const g = wm.geo, r = wm.drag ? wm.drag.now : g.r, x = r[0] + r[2] / 2, y = r[1] + r[3] / 2;
   mapSpot(mapWin, r);
   mapWin.classList.toggle('min', g.st === 'min');
-  const on = Math.max(0, g.m.findIndex(s => x >= s[0] && x < s[0] + s[2] && y >= s[1] && y < s[1] + s[3])), s = g.m[on];
-  const state = {min: ' (minimized)', max: ' (maximized)', full: ' (full screen)'}[g.st] || '';
+  const away = s => Math.max(s[0] - x, x - s[0] - s[2], 0) + Math.max(s[1] - y, y - s[1] - s[3], 0);
+  const on = g.m.reduce((best, s, i) => (away(s) < away(g.m[best]) ? i : best), 0), s = g.m[on];
+  const seen = g.m.some(m => r[0] < m[0] + m[2] && r[0] + r[2] > m[0] && r[1] < m[1] + m[3] && r[1] + r[3] > m[1]);
+  const state = ({min: ' (minimized)', max: ' (maximized)', full: ' (full screen)'}[g.st] || '') + (seen ? '' : ' (off screen)');
   mapInfo.textContent = `Monitor ${on + 1}: x ${r[0] - s[0]}, y ${r[1] - s[1]}, ${r[2]} × ${r[3]}${state}`;
 }
 
-function limit(value, low, high) { return Math.max(low, Math.min(value, high)); }
-
+// As far as Windows goes: past the edges of the monitors and larger than they are. Only the window's least size holds.
 function dragged(d, dx, dy) {
   let [x, y, w, h] = d.from;
   const [leastW, leastH] = wm.geo.min, how = d.how;
   if (!how) {
-    x = limit(x + dx, wm.left, wm.right - w);
-    y = limit(y + dy, wm.top, wm.bottom - h);
+    x += dx;
+    y += dy;
   } else {
-    if (how.includes('e')) w = limit(w + dx, leastW, wm.right - x);
-    if (how.includes('s')) h = limit(h + dy, leastH, wm.bottom - y);
-    if (how.includes('w')) { const end = x + w; x = limit(x + dx, wm.left, end - leastW); w = end - x; }
-    if (how.includes('n')) { const end = y + h; y = limit(y + dy, wm.top, end - leastH); h = end - y; }
+    if (how.includes('e')) w = Math.max(w + dx, leastW);
+    if (how.includes('s')) h = Math.max(h + dy, leastH);
+    if (how.includes('w')) { const end = x + w; w = Math.max(w - dx, leastW); x = end - w; }
+    if (how.includes('n')) { const end = y + h; h = Math.max(h - dy, leastH); y = end - h; }
   }
   return [x, y, w, h].map(Math.round);
+}
+
+function shotsDone() {
+  clearTimeout(wm.asking);
+  wm.asking = 0;
+  mapShot.disabled = false;
+  mapShot.textContent = 'Screenshot';
+}
+
+function gotShots(pictures) {
+  shotsDone();
+  wm.shots = pictures;
+  wm.shotAt = new Date().toLocaleTimeString();
+  drawMap();
 }
 
 function sendWin() {
@@ -1335,7 +1362,7 @@ function sendWin() {
 function dropWin() {
   if (!wm.drag) return;
   sendWin();
-  wm.done = setTimeout(() => { wm.drag = null; drawWin(); }, QUIET_MS);  // the app's answer is on its way: no jump back first
+  wm.done = setTimeout(() => { wm.drag = null; drawMap(); }, QUIET_MS);  // the app's answer is on its way: no jump back first
 }
 
 mapWin.addEventListener('pointerdown', ev => {
@@ -1357,6 +1384,13 @@ mapWin.addEventListener('pointermove', ev => {
 mapWin.addEventListener('pointerup', dropWin);
 mapWin.addEventListener('pointercancel', dropWin);
 mapBtn.addEventListener('click', () => showMap(mapEl.classList.contains('hid')));
+mapShot.addEventListener('click', () => {
+  if (!wm.node || wm.asking) return;
+  mapShot.disabled = true;
+  mapShot.textContent = 'Taking…';
+  wm.asking = setTimeout(shotsDone, SHOT_WAIT_MS);
+  cmd(['h', wm.node.id]);
+});
 document.getElementById('mapx').addEventListener('click', () => showMap(false));
 window.addEventListener('resize', drawMap);
 try { showMap(localStorage.getItem('sc-map') === '1'); } catch (e) { /* closed until asked for */ }
