@@ -731,8 +731,8 @@ class Mirror(QObject):
         name = w.objectName()
         if name and not name.startswith("qt_"):
             props["n"] = name
-        if not top and w.isHidden() and not _overflow_hidden(w):
-            props["h"] = 1
+        if not top and w.isHidden() and not _overflow_hidden(w) and not w.property("remote_private"):
+            props["h"] = 1  # a remote_private box is hidden on the desktop but still shown on the remote page
         if not w.isEnabled():
             props["e"] = 0
         tip = w.toolTip()
@@ -1104,10 +1104,6 @@ class Mirror(QObject):
                          w.tabToolTip(i)])
             pages.append(self._ref(w.widget(i), node))
         props["tabs"], props["cur"], props["ch"] = tabs, w.currentIndex(), pages
-        if w.property("remote_local_selection"):
-            # Which tab is open is this viewer's own business: the page keeps its own selection and never
-            # sends it back, and the host's tab changes do not move it (like the splitter's local sizes).
-            props["lsel"] = 1
 
     def _d_split(self, node, w, props) -> None:
         horizontal = w.orientation() == Qt.Orientation.Horizontal
@@ -1190,7 +1186,7 @@ class Mirror(QObject):
                 stretch = policy.horizontalStretch() if horizontal else policy.verticalStretch()
             main, across = (wide, tall) if horizontal else (tall, wide)
             return (0, self._ref(widget, node), stretch, main, across, _align(item.alignment().value, horizontal),
-                    widget.isHidden())
+                    widget.isHidden() and not widget.property("remote_private"))
         sub = item.layout()
         if sub is not None:
             grows = sub.expandingDirections().value & (1 if horizontal else 2)
@@ -1437,8 +1433,6 @@ class Mirror(QObject):
     def _c_s(self, client, node, w, message) -> None:
         index = int(message[2])
         if isinstance(w, QTabWidget):
-            if w.property("remote_local_selection"):
-                return  # each viewer keeps its own open tab; never move the host's (the page does not send it)
             if 0 <= index < w.count() and w.isTabEnabled(index):
                 w.setCurrentIndex(index)
         elif isinstance(w, QComboBox) and 0 <= index < w.count():

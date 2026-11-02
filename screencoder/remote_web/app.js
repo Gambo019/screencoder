@@ -535,7 +535,6 @@ function showTab(n, cur) {
     if (t[3]) tab.title = t[3];
     tab.addEventListener('click', () => {
       if (!t[2] || n.el.classList.contains('dis')) return;
-      if (n.p.lsel) { n.localCur = i; showTab(n, i); return; }  // this viewer's own open tab; never sent to the app
       showTab(n, i);  // shown at once; the app is told and has the last word
       pin();
       cmd(['s', n.id, i]);
@@ -620,8 +619,7 @@ const KIND = {
         sync(n.stack, want);
       }
       if (has('tabs') || has('cur') || has('ch')) {
-        if (p.lsel && n.localCur === undefined) n.localCur = p.cur || 0;  // start on the app's tab, then keep our own
-        showTab(n, p.lsel ? n.localCur : p.cur);
+        showTab(n, p.cur);  // the open tab is synced with the app and every other viewer
       }
     },
   },

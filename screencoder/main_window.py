@@ -746,8 +746,6 @@ class MainWindow(QMainWindow):
         files_tab.setSizes([270, 690])
 
         self.tabs = QTabWidget()  # names, and whether the Prompts tab is there at all: see _apply_mode
-        # Which tab is open is per-viewer: the remote page keeps its own, independent of this window (see remote.py).
-        self.tabs.setProperty("remote_local_selection", True)
         self.tabs.addTab(plan_tab, "Understanding && plan")
         self.tabs.addTab(self.prompts_view, "Prompts")
         self.tabs.addTab(self.activity_view, "Coding activity")
@@ -820,41 +818,13 @@ class MainWindow(QMainWindow):
             self.listen_btn.setEnabled(False)
             self.audio_status.setText("PC audio capture needs Windows")
 
-        # A typed message box (both modes): you here, or a teammate on the remote page, can drop a message into
-        # this panel. "Send to AI" asks the developer (answered here); "Send to remote assistant" just posts it
-        # so the person on the remote page sees it. The remote page gets its own private copy of this box
-        # (see remote.py) so the two sides never share text.
-        self.msg = Composer("Message", "Type a message — “Send to AI” asks the developer; “Send to remote "
-                            "assistant” just shows it here", min_text_height=48)
-        # The remote page renders its OWN private copy of this box (see remote.py _kind_of/_d_priv): the two
-        # sides never share text, so both can type at once. Only this one box is private; everything else mirrors.
+        # A private message box for the person on the remote page only: they can drop a message into this panel
+        # ("Send to AI" asks the developer, answered here; "Send to local user" just posts it so you see it).
+        # The box is drawn entirely on the page (see remote.py _kind_of/_d_priv and remote_web); the local user
+        # has no such box, so this is just an invisible marker telling the mirror where to place the remote one.
+        self.msg = QWidget()
         self.msg.setProperty("remote_private", True)
-        self.msg.edit.setMaximumHeight(90)
-        self.msg.capture_requested.connect(lambda mode: self.capture(mode, self.msg))
-        self.msg.notice.connect(self._notice)
-        self.msg.changed.connect(self._update_buttons)
-        self.msg.submitted.connect(lambda: self._post_message(to_ai=True))
-        self.msg_ai_btn = QPushButton("↪ Send to AI")
-        self.msg_ai_btn.setObjectName("primary")
-        self.msg_ai_btn.setToolTip("Ask the AI developer this - it answers here in the panel. A work request is "
-                                   "handed on to the coding agent, as with Ask.")
-        self.msg_ai_btn.clicked.connect(lambda: self._post_message(to_ai=True))
-        self.msg_remote_btn = QPushButton("💬 Send to remote assistant")
-        self.msg_remote_btn.setToolTip("Just post this message in the panel so the person on the remote page "
-                                       "sees it. The AI is not asked.")
-        self.msg_remote_btn.clicked.connect(lambda: self._post_message(to_ai=False))
-        msg_row = FlowLayout(spacing=4)
-        msg_row.addWidget(self.msg_ai_btn)
-        msg_row.addWidget(self.msg_remote_btn)
-        self.msg_box = QWidget()
-        msg_layout = QVBoxLayout(self.msg_box)
-        msg_layout.setContentsMargins(0, 6, 0, 0)
-        msg_layout.setSpacing(4)
-        self.msg_title = QLabel("💻 Your message")
-        self.msg_title.setStyleSheet("color:#9aa4b2; font-size:11px;")
-        msg_layout.addWidget(self.msg_title)
-        msg_layout.addWidget(self.msg)
-        msg_layout.addLayout(msg_row)
+        self.msg.hide()  # never shown on the desktop; the mirror keeps it visible on the remote page
 
         right = QGroupBox("Ask while it codes")
         self.right_panel = right
@@ -865,7 +835,7 @@ class MainWindow(QMainWindow):
         right_split.addWidget(self.chat)
         right_split.setSizes([360, 520])
         right_layout.addWidget(right_split, 1)
-        right_layout.addWidget(self.msg_box)
+        right_layout.addWidget(self.msg)  # hidden here; placeholder for the remote page's private message box
 
         # Questions and answers on the left, the code side (plan / activity / files) on the right. Drag the
         # divider between them to give either side more room; the position is remembered.
@@ -1110,10 +1080,6 @@ class MainWindow(QMainWindow):
         self.ask_btn.setEnabled(to_send)
         self.send_btn.setEnabled(alive and to_send)
         self.redirect_btn.setEnabled(working and to_send)
-        # The typed message box (both modes): enabled whenever it holds something to post.
-        msg_ready = not self.msg.is_empty()
-        self.msg_ai_btn.setEnabled(msg_ready)
-        self.msg_remote_btn.setEnabled(msg_ready)
         # Where the external agent stands (Non-coding): only once the developer has given it a prompt
         directing = run is not None and run.directing
         prompted = directing and bool(run.prompts)
@@ -2444,14 +2410,12 @@ class MainWindow(QMainWindow):
             can_forward=False,
         )
 
-    def _post_message(self, to_ai: bool, sender: str = "local", text: str | None = None,
+    def _post_message(self, to_ai: bool, sender: str = "remote", text: str | None = None,
                       attachments: list | None = None) -> None:
-        """A typed message from the local user (sender "local") or the remote page (sender "remote") drops into
-        the quick-answer panel. `to_ai`: ask the AI developer (answered in the panel, labeled as a teammate);
-        otherwise just post it so the other side sees it (the chat is mirrored to the remote page). The local
-        box's content is taken from self.msg; the remote page passes its own text/attachments explicitly."""
-        if text is None:
-            text, attachments = self.msg.take()
+        """A message typed on the remote page drops into the quick-answer panel. `to_ai`: ask the AI developer
+        (answered in the panel, labeled as a teammate); otherwise just post it so the local user sees it (the
+        chat is mirrored to the remote page). The remote page passes its own text/attachments explicitly."""
+        text = text or ""
         attachments = attachments or []
         if not text and not attachments:
             self._notice("Type a message or attach something first.")
