@@ -158,6 +158,26 @@ def _child_widgets(widget) -> list:
     return found
 
 
+def _overflow_hidden(w) -> bool:
+    """True when `w` is a toolbar item hidden only because the desktop toolbar is too narrow to fit it.
+
+    When its toolbar runs out of width, Qt moves the overflow into a ">>" menu and hides the item's widget,
+    but leaves the item's QAction visible. The remote window has its own width, so it should still show the
+    item: this lets _describe keep it visible. An item the app itself hid (its QAction made invisible) has
+    no visible action here, so it stays hidden on the remote too.
+    """
+    bar = w.parentWidget()
+    if not isinstance(bar, QToolBar):
+        return False
+    action = w.defaultAction() if isinstance(w, QToolButton) else None
+    if action is None:
+        for candidate in bar.actions():
+            if bar.widgetForAction(candidate) is w:
+                action = candidate
+                break
+    return action is not None and action.isVisible()
+
+
 def _kind_of(w) -> str:
     if isinstance(w, QMenu):
         return "menu"
@@ -705,7 +725,7 @@ class Mirror(QObject):
         name = w.objectName()
         if name and not name.startswith("qt_"):
             props["n"] = name
-        if not top and w.isHidden():
+        if not top and w.isHidden() and not _overflow_hidden(w):
             props["h"] = 1
         if not w.isEnabled():
             props["e"] = 0
