@@ -10,6 +10,7 @@ const QUIET_MS = 700;    // what the app says about a view this soon after the v
 const MAP_HIGH = 240;    // the most height the map of the monitors takes up
 const MAP_ROOM = 0.15;   // room left around the monitors on the map, as a share of their height
 const SHOT_WAIT_MS = 10000;  // the longest the Screenshot button stays busy if no answer comes
+const BLINK_MS = 500;    // the red lines around what is on screen in the app: on this long, off this long
 const LEAF = new Set(['btn', 'chk', 'lbl', 'edit', 'text', 'combo', 'num', 'prog', 'busy', 'canvas']);
 const RIGID = new Set(['btn', 'chk', 'combo', 'num', 'busy', 'prog']);  // never squeezed narrower than they are
 const MONO = /mono|consol|courier|cascadia|menlo|fixed/i;
@@ -305,7 +306,7 @@ function update(n, keys) {
   if (has('mx')) { s.maxWidth = p.mx && p.mx[0] ? p.mx[0] + 'px' : ''; s.maxHeight = p.mx && p.mx[1] ? p.mx[1] + 'px' : ''; }
   if (has('ss')) sheet(n);  // after the sizes and fonts: what the widget styles itself has the last word
   KIND[n.k].upd(n, p, has, keys);
-  if (has('sy') || has('sm') || has('end') || has('html')) n.again = true;
+  if (has('sy') || has('sm') || has('vw') || has('end') || has('html')) n.again = true;
   if (has('geo') && p.geo) { wm.node = n; wm.geo = p.geo; mapBtn.classList.remove('hid'); drawMap(); }
   if (n.frame && (has('wt') || has('wsz'))) frame(n);
 }
@@ -503,7 +504,10 @@ function placeOf(n) {
       }
       return [at.id, Math.round(lo * blocksPerPart(at, parts)), far(partBox(parts[lo]))];
     }
-    here = [...here.children].find(kid => { const box = kid.getBoundingClientRect(); return box.height && box.bottom > y; });
+    here = [...here.children].find(kid => {
+      const box = kid.getBoundingClientRect();
+      return box.height && box.bottom > y && !kid.classList.contains('eye');
+    });
   }
   return [at.id, -1, far(at.el.getBoundingClientRect())];
 }
@@ -528,8 +532,29 @@ function fit(n) {
   // Where the text ends. scrollHeight will not do for a text shorter than the view: it says the height of the view.
   const parts = partsOf(n), tail = parts && parts[parts.length - 1];
   const end = tail ? el.scrollTop + tail.getBoundingClientRect().bottom - viewTop(el) : el.scrollHeight - (n.room || 0);
-  const room = last ? Math.max(0, Math.ceil(last + el.clientHeight - end)) : 0;
+  const after = n.room ? Math.max(0, el.scrollHeight - n.room - end) : 0;  // what lies below the text: the view's padding
+  const room = last ? Math.max(0, Math.ceil(last + el.clientHeight - end - after)) : 0;
   if (room !== (n.room || 0)) { n.room = room; el.style.setProperty('--room', room + 'px'); }
+}
+
+// Where the text of a view ends, in pixels of this page.
+function textEnd(n) {
+  const el = n.el, parts = partsOf(n), inner = el.firstElementChild;
+  const tail = parts ? parts[parts.length - 1] : inner && [...inner.children].filter(kid => kid._n && kid.offsetHeight).pop();
+  return tail ? el.scrollTop + tail.getBoundingClientRect().bottom - viewTop(el) : el.scrollHeight - (n.room || 0);
+}
+
+// Two red lines around what the person at the app has on screen. They lie in the text, so they scroll with it.
+function watch(n) {
+  const at = n.p.vw, el = n.el;
+  if (!at) { if (n.eyes) for (const eye of n.eyes) eye.remove(); return; }
+  if (!n.eyes) n.eyes = [$('div', 'eye'), $('div', 'eye low')];
+  n.eyes.forEach((eye, i) => {
+    const y = at[i] === 0 ? 0 : at[i] === -1 ? textEnd(n) : offsetOf(n, at[i]);
+    if (y == null) return;
+    eye.style.top = Math.max(0, Math.min(y, el.scrollHeight)) + 'px';
+    if (eye.parentNode !== el) el.append(eye);  // new text in a view takes them away with what was there
+  });
 }
 
 // Show what the app shows, unless the viewer has the view in hand right now.
@@ -539,7 +564,7 @@ function pin() {
     if (!el.clientHeight) { n.again = true; continue; }  // not on show: put right as soon as it is
     const again = n.again;
     n.again = false;
-    if (again) fit(n);
+    if (again) { fit(n); watch(n); }
     const max = el.scrollHeight - el.clientHeight;
     if (n.p.sy != null) {
       if (!again || busy(n)) continue;
@@ -1422,6 +1447,9 @@ window.addEventListener('resize', drawMap);
 try { showMap(localStorage.getItem('sc-map') === '1'); } catch (e) { /* closed until asked for */ }
 
 // ---- things that concern the page as a whole
+
+// One timer for every red line: an animation of their own would start over each time the text around them is replaced.
+setInterval(() => document.body.classList.toggle('blink'), BLINK_MS);
 
 function topWindow() { return roots.length > 1 ? N.get(roots[roots.length - 1]) : null; }
 

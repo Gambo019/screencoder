@@ -776,6 +776,8 @@ class MainWindow(QMainWindow):
         self.side_label.setStyleSheet("color:#9aa4b2;")
         self.side_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)  # never forces width
         self.chat = ChatView()  # answers as chat bubbles, newest at the top
+        for view in (self.chat, self.plan_view, self.code_view):
+            view.setProperty("remote_watched", True)  # the remote page marks the part of it on screen here
         # No typed question: the question is what was heard (transcript); this only collects attachments.
         self.ask = Composer("Question", "", text_input=False)
         self.ask.capture_requested.connect(lambda mode: self.capture(mode, self.ask))

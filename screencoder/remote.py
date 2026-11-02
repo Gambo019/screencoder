@@ -961,6 +961,9 @@ class Mirror(QObject):
     def _scroll_state(self, node, w, props) -> None:
         bar = w.verticalScrollBar()
         value, end = bar.value(), bar.maximum()
+        if w.property("remote_watched") and w.isVisible():
+            # What is on screen here, from where to where (-1: the end of the text): the page marks it.
+            props["vw"] = [self._top_of(node, w, value), self._top_of(node, w, value + bar.pageStep()) if value < end else -1]
         if end <= 0:
             return
         if value >= end - (0 if isinstance(w, QPlainTextEdit) else 2):  # that bar counts lines, the others pixels

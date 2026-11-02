@@ -63,6 +63,12 @@ body.stale #root, body.stale #layers { opacity: .45; pointer-events: none; }
 .stack > .w { flex: 1 1 0; }
 
 :where(.k-scroll, .k-tree, .k-code, .k-rich:not(.auto)) { overflow: auto; }
+/* Two red lines around what the person at the app has on screen: watch() in app.js. Each is drawn just inside it. */
+:where(.k-scroll, .k-code, .k-rich:not(.auto)) { position: relative; }
+.eye { position: absolute; left: 0; right: 0; z-index: 5; height: 3px; background: #ff2d2d; box-shadow: 0 0 6px #ff2d2d;
+  pointer-events: none; }
+.eye.low { transform: translateY(-3px); }
+body.blink .eye { opacity: .12; }
 /* Room under the text of a view, so that it scrolls as far as the app's: fit() in app.js sets how much. */
 .k-scroll::after, .k-rich:not(.auto)::after { content: ''; display: block; height: var(--room, 0); }
 .k-scroll > .w { min-height: 100%; }
