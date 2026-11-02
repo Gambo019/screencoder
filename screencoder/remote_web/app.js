@@ -535,6 +535,7 @@ function showTab(n, cur) {
     if (t[3]) tab.title = t[3];
     tab.addEventListener('click', () => {
       if (!t[2] || n.el.classList.contains('dis')) return;
+      if (n.p.lsel) { n.localCur = i; showTab(n, i); return; }  // this viewer's own open tab; never sent to the app
       showTab(n, i);  // shown at once; the app is told and has the last word
       pin();
       cmd(['s', n.id, i]);
@@ -618,7 +619,10 @@ const KIND = {
         }
         sync(n.stack, want);
       }
-      if (has('tabs') || has('cur') || has('ch')) showTab(n, p.cur);
+      if (has('tabs') || has('cur') || has('ch')) {
+        if (p.lsel && n.localCur === undefined) n.localCur = p.cur || 0;  // start on the app's tab, then keep our own
+        showTab(n, p.lsel ? n.localCur : p.cur);
+      }
     },
   },
   split: {
@@ -806,6 +810,31 @@ const KIND = {
   busy: {
     make() { return $('div'); },
     upd(n, p, has) { if (has('col')) n.el.style.color = p.col || ''; },
+  },
+  priv: {  // this viewer's own private message box: its text lives only here until a Send button is pressed
+    make(n) {
+      const el = $('div', 'privbox');
+      n.title = $('div', 'priv-title');
+      n.ta = $('textarea', 'priv-text');
+      n.ta.placeholder = 'Type a message — “Send to AI” asks the developer; “Send to local user” shows it to them';
+      const row = $('div', 'priv-row');
+      n.toAi = $('button', 'priv-ai'); n.toAi.type = 'button'; n.toAi.textContent = '↪ Send to AI';
+      n.toLocal = $('button'); n.toLocal.type = 'button'; n.toLocal.textContent = '💬 Send to local user';
+      const post = action => {
+        if (!n.ta.value.trim()) return;
+        send(['post', n.id, action, n.ta.value]);  // nothing is sent while typing: the box is this viewer's alone
+        n.ta.value = '';
+      };
+      n.toAi.addEventListener('click', () => post(0));
+      n.toLocal.addEventListener('click', () => post(1));
+      n.ta.addEventListener('keydown', ev => {
+        if (ev.key === 'Enter' && (ev.ctrlKey || ev.metaKey)) { ev.preventDefault(); post(0); }
+      });
+      row.append(n.toAi, n.toLocal);
+      el.append(n.title, n.ta, row);
+      return el;
+    },
+    upd(n, p, has) { if (has('t')) n.title.textContent = p.t || 'Your message'; },
   },
   tree: {
     make(n) {

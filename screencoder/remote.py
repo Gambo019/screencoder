@@ -110,7 +110,7 @@ _BUTTONS = {0: Qt.MouseButton.LeftButton, 1: Qt.MouseButton.MiddleButton, 2: Qt.
 _MOUSE = {0: _E.MouseButtonPress, 1: _E.MouseMove, 2: _E.MouseButtonRelease, 3: _E.MouseButtonDblClick}
 _DRAG = 4  # a whole drag in one message: pressed at one point, let go at another
 # What a viewer may ask for. Those in _PASSIVE also work on a widget that is switched off.
-_OPS = frozenset("c t k s e v r a d m x q n b i g file".split())
+_OPS = frozenset("c t k s e v r a d m x q n b i g file post".split())
 _PASSIVE = frozenset(("q", "a", "file"))
 
 
@@ -179,6 +179,10 @@ def _overflow_hidden(w) -> bool:
 
 
 def _kind_of(w) -> str:
+    if w.property("remote_private"):
+        # A private, un-synced input: the remote page renders its OWN box here (not a copy of the desktop's),
+        # so the two sides never share text. Only a Send button sends anything (the "post" op). See _d_priv.
+        return "priv"
     if isinstance(w, QMenu):
         return "menu"
     if isinstance(w, QAbstractButton):
@@ -566,6 +570,8 @@ class Mirror(QObject):
         for w in QApplication.topLevelWidgets():
             if w is self._window or not w.isVisible():
                 continue
+            if w.property("remote_skip"):
+                continue  # a window kept off the remote on purpose (e.g. the local monitor-picker popup)
             if w.metaObject().className() in _SKIP_TOPS or w.windowType() == Qt.WindowType.ToolTip:
                 continue
             if w.windowType() == Qt.WindowType.Popup and not isinstance(w, QMenu):
@@ -928,6 +934,12 @@ class Mirror(QObject):
         if color is not None and hasattr(color, "name"):
             props["col"] = color.name()
 
+    def _d_priv(self, node, w, props) -> None:
+        """A private, un-synced input (see _kind_of). It is a leaf here: none of the desktop box's own contents
+        are described, so the local user's draft never reaches the remote page. The page renders its own box
+        and sends only on a button press (the "post" op)."""
+        props["t"] = "💻 Your message"
+
     def _d_snip(self, node, w, props) -> None:
         """A region picker. Its screenshot is frozen, so it goes over once; what moves while picking is the
         rectangle, and that is drawn on the other side. Nothing is sent while the viewer drags."""
@@ -1092,6 +1104,10 @@ class Mirror(QObject):
                          w.tabToolTip(i)])
             pages.append(self._ref(w.widget(i), node))
         props["tabs"], props["cur"], props["ch"] = tabs, w.currentIndex(), pages
+        if w.property("remote_local_selection"):
+            # Which tab is open is this viewer's own business: the page keeps its own selection and never
+            # sends it back, and the host's tab changes do not move it (like the splitter's local sizes).
+            props["lsel"] = 1
 
     def _d_split(self, node, w, props) -> None:
         horizontal = w.orientation() == Qt.Orientation.Horizontal
@@ -1421,6 +1437,8 @@ class Mirror(QObject):
     def _c_s(self, client, node, w, message) -> None:
         index = int(message[2])
         if isinstance(w, QTabWidget):
+            if w.property("remote_local_selection"):
+                return  # each viewer keeps its own open tab; never move the host's (the page does not send it)
             if 0 <= index < w.count() and w.isTabEnabled(index):
                 w.setCurrentIndex(index)
         elif isinstance(w, QComboBox) and 0 <= index < w.count():
@@ -1569,6 +1587,17 @@ class Mirror(QObject):
             mime.setUrls([QUrl.fromLocalFile(path)])
         sink.widget.insertFromMimeData(mime)
         self._dirty.add(sink.id)
+
+    def _c_post(self, client, node, w, message) -> None:
+        """A message from the remote page's own private box (see _d_priv): posted into the quick-answer panel.
+        message = ["post", node_id, action, text]; action 0 = ask the AI developer, 1 = just show it to the
+        local user. The box is the remote viewer's alone, so its text reaches here only on a button press."""
+        if node.kind != "priv" or len(message) < 4:
+            return
+        action, text = int(message[2]), str(message[3])
+        window = self._window
+        if text.strip() and hasattr(window, "_post_message"):
+            window._post_message(to_ai=(action == 0), sender="remote", text=text, attachments=[])
 
     def _sink(self, node: _Node):
         """The text box a pasted picture belongs to: the one pasted into, or the nearest one around it."""

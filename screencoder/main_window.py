@@ -746,10 +746,12 @@ class MainWindow(QMainWindow):
         files_tab.setSizes([270, 690])
 
         self.tabs = QTabWidget()  # names, and whether the Prompts tab is there at all: see _apply_mode
+        # Which tab is open is per-viewer: the remote page keeps its own, independent of this window (see remote.py).
+        self.tabs.setProperty("remote_local_selection", True)
         self.tabs.addTab(plan_tab, "Understanding && plan")
         self.tabs.addTab(self.prompts_view, "Prompts")
         self.tabs.addTab(self.activity_view, "Coding activity")
-        self.tabs.addTab(files_tab, "Files")
+        self.tabs.addTab(files_tab, "Output Code")
         code_side = QWidget()
         code_layout = QVBoxLayout(code_side)
         code_layout.setContentsMargins(0, 0, 0, 0)
@@ -818,6 +820,42 @@ class MainWindow(QMainWindow):
             self.listen_btn.setEnabled(False)
             self.audio_status.setText("PC audio capture needs Windows")
 
+        # A typed message box (both modes): you here, or a teammate on the remote page, can drop a message into
+        # this panel. "Send to AI" asks the developer (answered here); "Send to remote assistant" just posts it
+        # so the person on the remote page sees it. The remote page gets its own private copy of this box
+        # (see remote.py) so the two sides never share text.
+        self.msg = Composer("Message", "Type a message — “Send to AI” asks the developer; “Send to remote "
+                            "assistant” just shows it here", min_text_height=48)
+        # The remote page renders its OWN private copy of this box (see remote.py _kind_of/_d_priv): the two
+        # sides never share text, so both can type at once. Only this one box is private; everything else mirrors.
+        self.msg.setProperty("remote_private", True)
+        self.msg.edit.setMaximumHeight(90)
+        self.msg.capture_requested.connect(lambda mode: self.capture(mode, self.msg))
+        self.msg.notice.connect(self._notice)
+        self.msg.changed.connect(self._update_buttons)
+        self.msg.submitted.connect(lambda: self._post_message(to_ai=True))
+        self.msg_ai_btn = QPushButton("↪ Send to AI")
+        self.msg_ai_btn.setObjectName("primary")
+        self.msg_ai_btn.setToolTip("Ask the AI developer this - it answers here in the panel. A work request is "
+                                   "handed on to the coding agent, as with Ask.")
+        self.msg_ai_btn.clicked.connect(lambda: self._post_message(to_ai=True))
+        self.msg_remote_btn = QPushButton("💬 Send to remote assistant")
+        self.msg_remote_btn.setToolTip("Just post this message in the panel so the person on the remote page "
+                                       "sees it. The AI is not asked.")
+        self.msg_remote_btn.clicked.connect(lambda: self._post_message(to_ai=False))
+        msg_row = FlowLayout(spacing=4)
+        msg_row.addWidget(self.msg_ai_btn)
+        msg_row.addWidget(self.msg_remote_btn)
+        self.msg_box = QWidget()
+        msg_layout = QVBoxLayout(self.msg_box)
+        msg_layout.setContentsMargins(0, 6, 0, 0)
+        msg_layout.setSpacing(4)
+        self.msg_title = QLabel("💻 Your message")
+        self.msg_title.setStyleSheet("color:#9aa4b2; font-size:11px;")
+        msg_layout.addWidget(self.msg_title)
+        msg_layout.addWidget(self.msg)
+        msg_layout.addLayout(msg_row)
+
         right = QGroupBox("Ask while it codes")
         self.right_panel = right
         right_layout = QVBoxLayout(right)
@@ -827,6 +865,7 @@ class MainWindow(QMainWindow):
         right_split.addWidget(self.chat)
         right_split.setSizes([360, 520])
         right_layout.addWidget(right_split, 1)
+        right_layout.addWidget(self.msg_box)
 
         # Questions and answers on the left, the code side (plan / activity / files) on the right. Drag the
         # divider between them to give either side more room; the position is remembered.
@@ -1071,6 +1110,10 @@ class MainWindow(QMainWindow):
         self.ask_btn.setEnabled(to_send)
         self.send_btn.setEnabled(alive and to_send)
         self.redirect_btn.setEnabled(working and to_send)
+        # The typed message box (both modes): enabled whenever it holds something to post.
+        msg_ready = not self.msg.is_empty()
+        self.msg_ai_btn.setEnabled(msg_ready)
+        self.msg_remote_btn.setEnabled(msg_ready)
         # Where the external agent stands (Non-coding): only once the developer has given it a prompt
         directing = run is not None and run.directing
         prompted = directing and bool(run.prompts)
@@ -1117,6 +1160,7 @@ class MainWindow(QMainWindow):
             # Clicking the button puts the mouse on this window's monitor, so "the monitor under the
             # mouse" would always be the same one - let the user pick instead.
             menu = QMenu(self)
+            menu.setProperty("remote_skip", True)  # the monitor picker is a local popup; keep it off the remote page
             choices = {}
             for number, screen in enumerate(screens, 1):
                 size = screen.geometry().size() * screen.devicePixelRatio()
@@ -2330,23 +2374,46 @@ class MainWindow(QMainWindow):
         except OSError as exc:
             QMessageBox.critical(self, APP_NAME, f"Could not save the attachments:\n{exc}")
             return
+        body = self._side_body(question=text, imgs=imgs, files=files, heard=heard, heard_context=heard_context)
+        self._side_first = False
+        # Chat order is newest first: the question bubble goes in, then the (still empty) answer above it.
+        question = heard or "*(the question is in the attachments)*"
+        if attachments:
+            question += f"\n\n*+ {len(attachments)} attachment(s)*"
+        heard_title = "🎧 Supervisor" if self._directing() else "🎧 Heard"
+        heard_bubble = self.chat.add("heard", heard_title if heard else "📎 Question", question)
+        answer = self.chat.add("answer", DEV_TITLE)
+        answer.question = heard_bubble
+        answer.raw = ""  # everything the model has said so far (shown once it is clearly not a control marker)
+        answer.forward = (heard, imgs, files)  # what to hand to the coding session if this is a work request
+        answer.set_status("thinking…")
+        answer.set_waiting(True)  # a spinner and "next answer is coming" until the first words are there
+        answer.setToolTip(f"Quick answer ({self.settings.side_model})")
+        self._answers.append(answer)
+        side.send(atts.content_blocks(imgs, files, body))
+        self.stop_answer_btn.setEnabled(True)
+
+    def _side_body(self, *, question: str, imgs: list, files: list, heard: str, heard_context: str) -> str:
+        """Build the message for the quick-answer session: the task, plan, work state and the question itself.
+        Shared by the audio Ask and the typed message box (see _post_message)."""
         run = self.run
-        # Ask may hand a work request on to the coding session - only possible while one is alive.
+        # A request may be handed on to the coding session - only possible while one is alive.
         can_forward = bool(self.main and self.main.running and run)
+        att_desc = atts.describe_inputs(imgs, files) if (imgs or files) else ""
         if run is not None and run.directing:
             fresh = run.activity[run.side_seen:]
             run.side_seen = len(run.activity)
             log = "\n\n".join(fresh)
             if len(log) > LEAD_LOG_CHARS:
                 log = "(…earlier part omitted…)\n" + log[-LEAD_LOG_CHARS:]
-            body = prompts.lead_side_prompt(
-                question=text, attachments=atts.describe_inputs(imgs, files) if attachments else "",
+            return prompts.lead_side_prompt(
+                question=question, attachments=att_desc,
                 first=self._side_first, task=run.task, inputs=run.inputs_md, workspace=str(run.workspace),
                 shared=run.shared, working=self.phase in ACTIVE, prompt_open=run.prompt_open,
                 run_open=run.run_open, log=log, heard=heard, heard_context=heard_context,
                 can_forward=can_forward,
             )
-        elif run is not None:
+        if run is not None:
             # Working on a copy of the user's folder: which of his changes the person asking can see. While
             # some are missing there he is "in the middle of" them, and his work log - which reads as finished
             # work, done somewhere they cannot see - is kept from him until everything is in the folder.
@@ -2361,8 +2428,8 @@ class MainWindow(QMainWindow):
             plan = None
             if run.plan and not run.side_plan_sent:
                 plan, run.side_plan_sent = run.plan, True
-            body = prompts.side_prompt(
-                question=text, attachments=atts.describe_inputs(imgs, files) if attachments else "",
+            return prompts.side_prompt(
+                question=question, attachments=att_desc,
                 first=self._side_first, task=run.task, inputs=run.inputs_md,
                 workspace=str(run.given or run.workspace), given=run.given is not None,
                 pending=pending, landed=landed, doing=self._changes_in_progress() if pending else "",
@@ -2370,26 +2437,56 @@ class MainWindow(QMainWindow):
                 activity=activity, touched=run.touched, heard=heard, heard_context=heard_context,
                 can_forward=can_forward,
             )
-        else:
-            body = prompts.side_prompt(
-                question=text, attachments=atts.describe_inputs(imgs, files) if attachments else "",
-                first=self._side_first, task=None, inputs="", workspace="", phase=self.phase.value,
-                plan=None, activity="", touched=[], heard=heard, heard_context=heard_context,
-                can_forward=False,
-            )
-        self._side_first = False
-        # Chat order is newest first: the question bubble goes in, then the (still empty) answer above it.
-        question = heard or "*(the question is in the attachments)*"
+        return prompts.side_prompt(
+            question=question, attachments=att_desc,
+            first=self._side_first, task=None, inputs="", workspace="", phase=self.phase.value,
+            plan=None, activity="", touched=[], heard=heard, heard_context=heard_context,
+            can_forward=False,
+        )
+
+    def _post_message(self, to_ai: bool, sender: str = "local", text: str | None = None,
+                      attachments: list | None = None) -> None:
+        """A typed message from the local user (sender "local") or the remote page (sender "remote") drops into
+        the quick-answer panel. `to_ai`: ask the AI developer (answered in the panel, labeled as a teammate);
+        otherwise just post it so the other side sees it (the chat is mirrored to the remote page). The local
+        box's content is taken from self.msg; the remote page passes its own text/attachments explicitly."""
+        if text is None:
+            text, attachments = self.msg.take()
+        attachments = attachments or []
+        if not text and not attachments:
+            self._notice("Type a message or attach something first.")
+            return
+        role, title = ("local", "💻 Local") if sender == "local" else ("remote", "🖥 Remote assistant")
+        shown = text or "*(see the attachments)*"
         if attachments:
-            question += f"\n\n*+ {len(attachments)} attachment(s)*"
-        heard_title = "🎧 Supervisor" if self._directing() else "🎧 Heard"
-        heard_bubble = self.chat.add("heard", heard_title if heard else "📎 Question", question)
+            shown += f"\n\n*+ {len(attachments)} attachment(s)*"
+        posted = self.chat.add(role, title, shown)
+        posted.finish()
+        if not to_ai:
+            return
+        side = self._ensure_side()
+        if side is None:
+            if self.settings.side_provider != llm.CLAUDE_CODE:
+                self._notice(llm.ready(self.settings, self.settings.side_provider)[1])
+            else:
+                self._claude()
+            return
+        self._questions += 1
+        base = self.run.inputs if self.run else HOME_DIR / "scratch"
+        try:
+            imgs, files = atts.prepare(attachments, base / "questions" / f"q{self._questions:02d}", "Image")
+        except OSError as exc:
+            QMessageBox.critical(self, APP_NAME, f"Could not save the attachments:\n{exc}")
+            return
+        body = self._side_body(question=prompts.teammate_prefix(sender) + text, imgs=imgs, files=files,
+                               heard="", heard_context="")
+        self._side_first = False
         answer = self.chat.add("answer", DEV_TITLE)
-        answer.question = heard_bubble
-        answer.raw = ""  # everything the model has said so far (shown once it is clearly not a control marker)
-        answer.forward = (heard, imgs, files)  # what to hand to the coding session if this is a work request
+        answer.question = posted
+        answer.raw = ""
+        answer.forward = (text, imgs, files)  # a work request is handed to the coding session like any other
         answer.set_status("thinking…")
-        answer.set_waiting(True)  # a spinner and "next answer is coming" until the first words are there
+        answer.set_waiting(True)
         answer.setToolTip(f"Quick answer ({self.settings.side_model})")
         self._answers.append(answer)
         side.send(atts.content_blocks(imgs, files, body))

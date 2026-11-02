@@ -17,6 +17,8 @@ ROLE_STYLE = {
     "heard": ("#58a6ff", "#10192a"),  # what was heard / asked
     "answer": ("#3fb950", "#0f1a13"),  # the developer's reply
     "agent": ("#e3b341", "#1f1a0d"),  # a change request handed to the coding session
+    "local": ("#a371f7", "#17132a"),  # a typed message from the local user
+    "remote": ("#39c5cf", "#0c1b1e"),  # a typed message from the remote assistant (the web page)
     "error": ("#f85149", "#231113"),
 }
 MAX_BUBBLES = 200

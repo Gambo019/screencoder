@@ -44,6 +44,18 @@ def already_said(said: str) -> str:
             "are not another 'Good', 'Okay', 'Right', 'Understood' or 'Got it' - they are the content itself.")
 
 
+def teammate_prefix(sender: str) -> str:
+    """Prefix a typed message with who it is from, when it is sent to the AI by a teammate (not the interviewer).
+    `sender`: "local" (same machine) or "remote" (the web page). Empty string for anything else -> no prefix."""
+    who = {"local": "a teammate working with you at this machine",
+           "remote": "a teammate helping you from another machine"}.get(sender)
+    if not who:
+        return ""
+    return (f"[This message is from {who} - a colleague on your side, not the interviewer. Answer it directly "
+            "and helpfully in the first person; if it asks for a code change, hand it on to your coding session "
+            "as usual.]\n")
+
+
 def name_note(name: str) -> str:
     """The developer's name, appended to a system prompt so they answer to it. The person they are talking to
     (the interviewer) may address them by it; an empty name adds nothing. One line, no newlines - system

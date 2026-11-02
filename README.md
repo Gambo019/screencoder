@@ -56,7 +56,7 @@ The window has the question-and-answer panel on the left and the code side on th
      - It must call every public function and method of the original code directly, not only through its own entry point.
      - If commands are disabled, it does these checks by reading and tracing, and says the code was not executed.
      - When it finishes, the app parses the Python and JSON files it wrote. If one fails to parse, it is sent back to the agent to fix, up to twice.
-   - **Files:** a VS Code-style explorer and a code viewer. **◀ Explorer** folds the explorer away to give the code the full width.
+   - **Output Code:** a VS Code-style explorer and a code viewer. **◀ Explorer** folds the explorer away to give the code the full width.
      - The viewer has line numbers and syntax colours for Python, JavaScript, TypeScript, C#, Java, C, C++, Go and many more.
      - **Copy code** copies the open file for pasting back into your IDE.
      - File names are coloured by status. Plain means an original file from the problem that the agent didn't touch. Amber with **M** means an original file the agent edited. Green with **U** means a new file the agent created.
@@ -104,7 +104,7 @@ Every button is enabled only while what it does is possible:
 | **Workspace** field and **Browse…** | no task has been started yet (the folder is fixed once it runs) |
 | **Open folder** | a task has a workspace, or the typed folder exists |
 | **↻ Revise plan** | the plan is waiting for approval and feedback has been typed |
-| **↻ Refresh** / **📋 Copy code** (Files) | a task exists / a file is open |
+| **↻ Refresh** / **📋 Copy code** (Output Code) | a task exists / a file is open |
 | **✋ Interrupt** / **■ Stop** | the session is in the middle of a turn / is running |
 | **✅ Agent finished** / **⏳ Agent still working** | a Vibe-Coding session is running and he has written a prompt |
 | **✔ Sent to the agent** (on each prompt) | it is the newest prompt and has not been marked as sent yet |
@@ -168,7 +168,7 @@ What happens, turn by turn:
 
 Questions from the supervisor at any time ("why does this work?", "what's the complexity?", "can you wrap up?"): click **⚡ Ask**. The quick model answers in seconds as the same developer. It knows his plan, his prompts and his reviews, and can read the workspace. A wrap-up covers what was built, what was verified and how, and what he would improve with more time. Answers given this way are passed to the developer's working session with his next message, so he stays consistent with them.
 
-The **Files** tab shows the agent's workspace and refreshes by itself every few seconds: green **U** for files the agent created since the task started, amber **M** for files it changed, with the changed lines bright.
+The **Output Code** tab shows the agent's workspace and refreshes by itself every few seconds: green **U** for files the agent created since the task started, amber **M** for files it changed, with the changed lines bright.
 
 Each developer turn costs one round of the coding model. If the turns feel slow, lower the coding effort in **Settings** for this kind of task.
 
@@ -178,7 +178,7 @@ Each developer turn costs one round of the coding model. If the turns feel slow,
 - **Your project folder is never changed** (coding languages). When you give a folder:
   - The developer gets his own copy of it at `~/ScreenCoder/runs/<id>/workspace` and edits and runs only there. Cache folders (`__pycache__`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`) are not copied. For a very large folder (over 20,000 files or 400 MB) the app asks before copying.
   - His session is started in the copy and is not told where your folder is. It is also instructed to stay inside its working directory.
-  - **You bring his changes over yourself.** The Files tab shows the copy: amber **M** for files he edited, green **U** for new ones, changed lines bright. **Open folder** opens the copy.
+  - **You bring his changes over yourself.** The Output Code tab shows the copy: amber **M** for files he edited, green **U** for new ones, changed lines bright. **Open folder** opens the copy.
   - **He speaks as the owner of your folder and never about his own copy or its state**, because your folder is the only thing the person asking can see.
     - The quick-answer side is not told that a copy exists. For it there is one project. With every question the app compares the files and tells it which changes it "is making right now" (not in your folder yet, with the exact difference) and which it "has made" (in your folder).
     - While any change is missing from your folder, he answers as someone in the middle of the work: "Yes, I'm working on it right now. The bug is on line 7… I'm changing that line to…", "Not yet. Line 7 still reads…; once I have made that change I'll run the tests." He does not say "done", "fixed" or "tests pass", and he does not say things like "the fix isn't in the file yet" either, since that would point to another place. His work log, which reads as finished work, is kept from him until everything is in your folder.
