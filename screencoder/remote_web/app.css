@@ -133,11 +133,15 @@ input[type=number].w { width: 90px; }
 .k-rich img { max-width: 100%; }
 
 .k-code { display: flex; align-items: flex-start; }
-.k-code pre { margin: 0; padding: 4px 8px; font: inherit; white-space: pre; tab-size: 4; }
+.k-code pre { margin: 0; padding: 4px 8px; font: inherit; white-space: pre; tab-size: 4; counter-reset: cl; }
 .k-code.wr .src { white-space: pre-wrap; overflow-wrap: anywhere; flex: 1 1 0; }
 .k-code .src { flex: 1 0 auto; }
-.k-code .gut { flex: 0 0 auto; position: sticky; left: 0; text-align: right; color: #6e7681; user-select: none;
-  background: inherit; border-right: 1px solid var(--line); }
+.k-code .cl { position: relative; }
+/* The numbers belong to the lines, so a line that wraps keeps its number beside it. */
+.k-code.ln .src { padding-left: calc(var(--gw) + 25px);
+  background: linear-gradient(var(--line), var(--line)) no-repeat calc(var(--gw) + 16px) 0 / 1px 100%; }
+.k-code.ln .cl::before { counter-increment: cl; content: counter(cl); position: absolute; right: calc(100% + 17px);
+  color: #6e7681; user-select: none; white-space: nowrap; }
 
 .k-tree { padding: 2px 0; user-select: none; }
 .k-tree .row, .k-tree .hdr { display: flex; align-items: center; gap: 12px; padding: 1px 8px 1px 6px;
@@ -212,6 +216,39 @@ img.k-canvas { display: block; touch-action: none; user-select: none; }
 #hud::before { content: '●'; margin-right: 5px; color: #f85149; }
 #hud.ok::before { color: #3fb950; }
 #hud.bad { bottom: auto; top: 10px; padding: 5px 14px; font-size: 13px; color: var(--text); border-color: #f85149; }
+/* ---- where the app is on its PC: the monitors to scale, the window on them can be dragged and resized */
+#mapbtn { position: fixed; left: calc(50% + 56px); bottom: 3px; z-index: 60; padding: 1px 9px; font: inherit;
+  font-size: 11px; color: var(--mid); background: #0d1117d9; border: 1px solid var(--line); border-radius: 10px;
+  cursor: pointer; }
+#mapbtn:hover, #mapbtn.on { color: var(--text); border-color: var(--link); }
+#map { position: fixed; right: 6px; bottom: 44px; z-index: 60; width: min(560px, calc(100vw - 12px));
+  background: var(--window); border: 1px solid #4b535d; border-radius: 6px; box-shadow: 0 8px 24px #000000b0; }
+.map-bar { display: flex; align-items: center; padding: 3px 3px 3px 10px; font-size: 11px;
+  border-bottom: 1px solid var(--line); }
+#mapinfo { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-variant-numeric: tabular-nums; }
+#mapx { font: inherit; color: var(--mid); background: none; border: none; padding: 2px 7px; cursor: pointer; }
+#mapx:hover { color: var(--text); }
+#mapstage { position: relative; margin: 9px; user-select: none; touch-action: none; overflow: hidden; }
+.map-scr { position: absolute; padding: 2px 4px; overflow: hidden; white-space: nowrap; font-size: 10px;
+  color: var(--mid); background: var(--base); border: 1px solid #4b535d; }
+.map-scr.pri { border-color: #6e7681; }
+#mapwin { position: absolute; background: #1f6feb40; border: 1px solid var(--link); cursor: move; touch-action: none; }
+#mapwin.min { background: none; border-style: dashed; }
+.map-h { position: absolute; }
+.map-h[data-e="n"], .map-h[data-e="s"] { left: 4px; right: 4px; height: 8px; cursor: ns-resize; }
+.map-h[data-e="e"], .map-h[data-e="w"] { top: 4px; bottom: 4px; width: 8px; cursor: ew-resize; }
+.map-h[data-e="n"] { top: -2px; }
+.map-h[data-e="s"] { bottom: -2px; }
+.map-h[data-e="e"] { right: -2px; }
+.map-h[data-e="w"] { left: -2px; }
+.map-h[data-e="ne"], .map-h[data-e="nw"], .map-h[data-e="se"], .map-h[data-e="sw"] { width: 10px; height: 10px;
+  background: var(--link); }
+.map-h[data-e="ne"] { top: -2px; right: -2px; cursor: nesw-resize; }
+.map-h[data-e="sw"] { bottom: -2px; left: -2px; cursor: nesw-resize; }
+.map-h[data-e="nw"] { top: -2px; left: -2px; cursor: nwse-resize; }
+.map-h[data-e="se"] { bottom: -2px; right: -2px; cursor: nwse-resize; }
+
 #gate { position: fixed; inset: 0; z-index: 80; display: flex; align-items: center; justify-content: center;
   background: var(--window); }
 #gate form { display: flex; flex-direction: column; gap: 10px; width: min(420px, 90vw); }

@@ -29,6 +29,7 @@ import tempfile
 import time
 import traceback
 import zlib
+from bisect import bisect_left
 from collections import deque
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -91,6 +92,7 @@ _WATCHED = frozenset((
     _E.LayoutRequest, _E.StyleChange, _E.FontChange, _E.ToolTipChange, _E.WindowTitleChange, _E.ParentChange,
     _E.ReadOnlyChange, _E.Polish,
 ))
+_PLACED = frozenset((_E.Move, _E.Resize, _E.WindowStateChange))  # of the main window only: where it is on its monitors
 _SKIP = (QScrollBar, QSizeGrip, QRubberBand, QSplitterHandle)
 _SKIP_TOPS = ("QTipLabel", "QComboBoxPrivateContainer")
 _EXPAND, _GROW, _IGNORE = 2, 1, 8  # QSizePolicy flags
@@ -110,8 +112,8 @@ _BUTTONS = {0: Qt.MouseButton.LeftButton, 1: Qt.MouseButton.MiddleButton, 2: Qt.
 _MOUSE = {0: _E.MouseButtonPress, 1: _E.MouseMove, 2: _E.MouseButtonRelease, 3: _E.MouseButtonDblClick}
 _DRAG = 4  # a whole drag in one message: pressed at one point, let go at another
 # What a viewer may ask for. Those in _PASSIVE also work on a widget that is switched off.
-_OPS = frozenset("c t k s e v r a d m x q n b i g file post".split())
-_PASSIVE = frozenset(("q", "a", "file"))
+_OPS = frozenset("c t k s e v r a d m x q n b i g y w file post".split())
+_PASSIVE = frozenset(("q", "a", "file", "y"))
 
 
 def _ptr(obj) -> int:
@@ -298,6 +300,58 @@ def _code_html(document) -> tuple[str, int]:
     return "\n".join(lines), len(lines)
 
 
+def _unwritten(document) -> list[int]:
+    """The blocks Qt's HTML export leaves out: the two empty ones marking where a table starts and ends."""
+    gaps, frames = [], list(document.rootFrame().childFrames())
+    while frames:
+        frame = frames.pop()
+        frames += frame.childFrames()
+        gaps += [document.findBlock(frame.firstPosition()).blockNumber(),
+                 document.findBlock(frame.lastPosition() + 1).blockNumber()]
+    return sorted(gaps)
+
+
+def _doc_spot(document, y: float, gaps=()) -> tuple[int, float]:
+    """The block of a laid-out document at height `y`, counted among those the export writes (`gaps` are the
+    ones it does not), and how far down it that is (0 its top, 1 its end)."""
+    layout = document.documentLayout()
+    spot = QPointF(document.documentMargin() + 8, y)  # a little way in: at the very edge, a table is not yet its cells
+    block = document.findBlock(max(0, layout.hitTest(spot, Qt.HitTestAccuracy.FuzzyHit)))
+    box = layout.blockBoundingRect(block)
+    number = block.blockNumber()
+    return number - bisect_left(gaps, number), round(min(1.0, max(0.0, (y - box.y()) / (box.height() or 1))), 4)
+
+
+def _doc_block(document, index: int, gaps=()):
+    """The block that _doc_spot calls `index`."""
+    for gap in gaps:
+        if gap > index:
+            break
+        index += 1
+    return document.findBlockByNumber(index)
+
+
+def _line_spot(document, line: int) -> tuple[int, float]:
+    """The same for a plain-text view, whose scroll bar counts lines as displayed: a wrapped line is several."""
+    block = document.findBlockByLineNumber(line)
+    return block.blockNumber(), round((line - block.firstLineNumber()) / max(1, block.lineCount()), 4)
+
+
+def _monitor_box(screen) -> list[int]:
+    """A monitor in physical pixels. Qt keeps each monitor's corner where it physically is and scales what lies
+    inside from there, so with monitors of different scaling only pixels add up to the real arrangement."""
+    box, ratio = screen.geometry(), screen.devicePixelRatio()
+    return [box.x(), box.y(), round(box.width() * ratio), round(box.height() * ratio)]
+
+
+def _monitor_at(x: int, y: int):
+    """The monitor a physical point is on, or the nearest one."""
+    def away(screen) -> int:
+        left, top, width, height = _monitor_box(screen)
+        return max(left - x, x - left - width + 1, 0) + max(top - y, y - top - height + 1, 0)
+    return min(QApplication.screens(), key=away)
+
+
 def _data_url(image: QImage, quality: int = 82, lossy_kind: str = "jpeg") -> str:
     """A picture as a data URL: PNG while it is small or has transparency, else `lossy_kind` (jpeg or webp)."""
     lossy = image.width() * image.height() > LOSSY_FROM and not image.hasAlphaChannel()
@@ -462,6 +516,8 @@ class Mirror(QObject):
                     self._touch(obj, kind)
             except Exception:  # a widget half-way through being built or destroyed: the slow pass gets it
                 pass
+        elif kind in _PLACED and obj is self._window:
+            self._mark_ptr(_ptr(obj))
         return False
 
     def _touch(self, widget, kind) -> None:
@@ -763,6 +819,8 @@ class Mirror(QObject):
             props["wsz"] = [w.width(), w.height()]
             if w.isModal():
                 props["md"] = 1
+            if w is self._window:
+                props["geo"] = self._where(w)
         else:
             low_w, low_h, high_w, high_h = w.minimumWidth(), w.minimumHeight(), w.maximumWidth(), w.maximumHeight()
             if low_w or low_h:
@@ -779,6 +837,21 @@ class Mirror(QObject):
                 props["fr"] = 1
         getattr(self, "_d_" + node.kind)(node, w, props)
         return props, kids
+
+    def _where(self, w) -> dict:
+        """Where the window is on this machine's monitors, in physical pixels and with its frame: for the map."""
+        screen, frame, least = w.screen(), w.frameGeometry(), w.minimumSizeHint().expandedTo(w.minimumSize())
+        ratio, corner, primary = screen.devicePixelRatio(), screen.geometry().topLeft(), QApplication.primaryScreen()
+        normal = w.normalGeometry()
+        return {
+            "m": [[*_monitor_box(s), 1 if s == primary else 0] for s in QApplication.screens()],
+            "r": [round(corner.x() + (frame.x() - corner.x()) * ratio), round(corner.y() + (frame.y() - corner.y()) * ratio),
+                  round(frame.width() * ratio), round(frame.height() * ratio)],
+            "min": [round((least.width() + frame.width() - w.width()) * ratio),
+                    round((least.height() + frame.height() - w.height()) * ratio)],
+            "st": "min" if w.isMinimized() else "full" if w.isFullScreen() else "max" if w.isMaximized() else "",
+            "n": [round(normal.width() * ratio), round(normal.height() * ratio)],  # its size when it is not maximized
+        }
 
     def _d_btn(self, node, w, props) -> None:
         props["t"] = _plain_label(w.text())
@@ -861,10 +934,41 @@ class Mirror(QObject):
         if w.isReadOnly():
             props["ro"] = 1
 
-    def _scroll_end(self, w, props) -> None:
+    def _scroll_state(self, node, w, props) -> None:
         bar = w.verticalScrollBar()
-        if bar.maximum() > 0 and bar.value() >= bar.maximum() - 2:
+        value, end = bar.value(), bar.maximum()
+        if end <= 0:
+            return
+        if value >= end - (0 if isinstance(w, QPlainTextEdit) else 2):  # that bar counts lines, the others pixels
             props["end"] = 1  # this side follows the end of the text, so the viewer's does too
+        if w.isVisible():  # a tab not open here says nothing: a viewer on it (sync off) scrolls it on their own
+            props["sy"] = self._top_of(node, w, value)
+
+    def _top_of(self, node, w, value: int):
+        """What the top of a scrolled view shows, by its content and not in pixels: the other side lays the text
+        out in another width, where the same offset would show something else.
+
+        0 is the very start. Otherwise [the widget it lies in, the block or line of its text (-1: it has none),
+        how far down that is, from 0 to 1]. Viewers send the same back; _c_y reads it."""
+        if not value:
+            return 0
+        if isinstance(w, QPlainTextEdit):
+            return [node.id, *_line_spot(w.document(), value)]
+        if isinstance(w, QTextEdit):
+            return [node.id, *_doc_spot(w.document(), value, node.cache.get("gaps", ()))]
+        spot, here, y, within = node, w.widget(), value, value  # a scroll area: down to what lies at that height
+        while here is not None:
+            known = self._by_ptr.get(_ptr(here))
+            if known is not None:
+                spot, within = known, y
+                if isinstance(here, QTextEdit):
+                    return [spot.id, *_doc_spot(here.document(), y, known.cache.get("gaps", ()))]
+            kids = [kid for kid in _child_widgets(here) if kid.isVisible() and kid.y() + kid.height() > y]
+            if not kids:
+                break
+            here = min(kids, key=lambda kid: kid.y())
+            y -= here.y()
+        return [spot.id, -1, round(min(1.0, max(0.0, within / (spot.widget.height() or 1))), 4)]
 
     def _d_rich(self, node, w, props) -> None:
         cache = node.cache
@@ -876,17 +980,19 @@ class Mirror(QObject):
                 self._later.add(node.id)  # a big document that keeps changing: not on every single change
             else:
                 cache["html"], cache["bs"] = _body(w.toHtml())
+                cache["gaps"] = _unwritten(document)
                 took = time.perf_counter() - now
                 cache["rev"], cache["next"] = revision, now + took + min(0.4, took * 8)
         props["html"] = cache.get("html", "")
         if cache.get("bs"):
             props["bs"] = cache["bs"]
+        props["bc"] = document.blockCount() - len(cache.get("gaps", ()))
         if w.verticalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAlwaysOff:
             props["au"] = 1  # as tall as its text: the height is the browser's business
             props.pop("mn", None)
             props.pop("mx", None)
         else:
-            self._scroll_end(w, props)
+            self._scroll_state(node, w, props)
 
     def _d_code(self, node, w, props) -> None:
         cache = node.cache
@@ -909,7 +1015,7 @@ class Mirror(QObject):
             props["ln"] = cache["lines"]
         if w.lineWrapMode() != QPlainTextEdit.LineWrapMode.NoWrap:
             props["wr"] = 1
-        self._scroll_end(w, props)
+        self._scroll_state(node, w, props)
 
     def _d_combo(self, node, w, props) -> None:
         props["it"] = [w.itemText(i) for i in range(min(w.count(), COMBO_CAP))]
@@ -1125,7 +1231,7 @@ class Mirror(QObject):
         props["ch"] = [self._ref(inner, node)] if inner is not None else []
         if w.widgetResizable():
             props["fit"] = 1
-        self._scroll_end(w, props)
+        self._scroll_state(node, w, props)
 
     def _d_box(self, node, w, props) -> None:
         if isinstance(w, QGroupBox):
@@ -1529,6 +1635,51 @@ class Mirror(QObject):
         else:
             return
         self._picked(client, node, w)
+
+    def _c_y(self, client, node, w, message) -> None:
+        """A viewer scrolled: show here what they show there. 0 is the very start, -1 the very end; anything else
+        names a place the way _top_of does."""
+        if node.kind not in ("rich", "code", "scroll") or not w.isVisible():
+            return
+        bar, target = w.verticalScrollBar(), int(message[2])
+        if target <= 0:
+            bar.setValue(bar.maximum() if target else 0)
+            return
+        spot = self._nodes.get(target)
+        if spot is None or not shiboken6.isValid(spot.widget):
+            return
+        inner, index, part = spot.widget, int(message[3]), float(message[4])
+        if isinstance(inner, QPlainTextEdit):
+            block = inner.document().findBlockByNumber(index)
+            bar.setValue(block.firstLineNumber() + round(part * block.lineCount()))
+            return
+        if index >= 0 and isinstance(inner, QTextEdit):
+            document = inner.document()
+            box = document.documentLayout().blockBoundingRect(_doc_block(document, index, spot.cache.get("gaps", ())))
+            y = box.y() + part * box.height()
+        else:
+            y = part * inner.height()
+        if inner is not w:
+            area = w.widget()
+            if area is None or not area.isAncestorOf(inner):
+                return
+            y += inner.mapTo(area, QPoint(0, 0)).y()
+        bar.setValue(round(y))
+
+    def _c_w(self, client, node, w, message) -> None:
+        """A viewer moved or resized the app on the map of its monitors: physical pixels, frame included."""
+        if w is not self._window:
+            return
+        x, y, width, height = [int(value) for value in message[2:6]]
+        screen = _monitor_at(x + width // 2, y + height // 2)
+        corner, ratio = screen.geometry().topLeft(), screen.devicePixelRatio()
+        if w.isMaximized() or w.isFullScreen():
+            w.showNormal()  # the map shows a normal window from here on; a minimized one stays down and comes back there
+        frame, inner = w.frameGeometry(), w.geometry()
+        w.setGeometry(round(corner.x() + (x - corner.x()) / ratio) + inner.x() - frame.x(),
+                      round(corner.y() + (y - corner.y()) / ratio) + inner.y() - frame.y(),
+                      round(width / ratio) - frame.width() + inner.width(),
+                      round(height / ratio) - frame.height() + inner.height())
 
     def _c_g(self, client, node, w, message) -> None:
         """A viewer wants the screenshot of a picker that was not sent unasked (another monitor's)."""

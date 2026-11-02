@@ -4,6 +4,10 @@
 (() => {
 const TEXT_MS = 25;      // typing is sent this long after a key, so a burst of keys travels as one message
 const PING_MS = 2000;
+const SCROLL_MS = 40;    // scrolling or dragging is passed on to the app this often
+const HAND_MS = 200;     // a scroll this soon after the wheel, a finger or a key is the viewer's own
+const QUIET_MS = 700;    // what the app says about a view this soon after the viewer scrolled it is that scroll coming back
+const MAP_HIGH = 240;    // the most height the map of the monitors takes up
 const LEAF = new Set(['btn', 'chk', 'lbl', 'edit', 'text', 'combo', 'num', 'prog', 'busy', 'canvas']);
 const RIGID = new Set(['btn', 'chk', 'combo', 'num', 'busy', 'prog']);  // never squeezed narrower than they are
 const MONO = /mono|consol|courier|cascadia|menlo|fixed/i;
@@ -132,6 +136,7 @@ function onMessage(ev) {
 function reset() {
   for (const n of N.values()) { if (n.st) n.st.remove(); if (n.frame) n.frame.remove(); }
   N.clear(); IMG.clear(); scrollers.clear(); pendingText.clear();
+  sized.disconnect();
   rootEl.replaceChildren(); layersEl.replaceChildren();
   roots = [];
   snipOver();
@@ -216,7 +221,7 @@ function discard(n) {
   if (n.el) n.el.remove();
   if (n.st) n.st.remove();
   if (n.frame) n.frame.remove();
-  scrollers.delete(n);
+  if (scrollers.delete(n)) sized.unobserve(n.el);
   pendingText.delete(n.id);
   if (n.k === 'snip' || n.k === 'canvas') IMG.delete(n.p.img);  // its own picture, large and of no further use
   if (N.get(n.id) === n) N.delete(n.id);
@@ -297,6 +302,8 @@ function update(n, keys) {
   if (has('mx')) { s.maxWidth = p.mx && p.mx[0] ? p.mx[0] + 'px' : ''; s.maxHeight = p.mx && p.mx[1] ? p.mx[1] + 'px' : ''; }
   if (has('ss')) sheet(n);  // after the sizes and fonts: what the widget styles itself has the last word
   KIND[n.k].upd(n, p, has, keys);
+  if (has('sy') || has('end') || has('html')) n.again = true;
+  if (has('geo') && p.geo) { wm.node = n; wm.geo = p.geo; mapBtn.classList.remove('hid'); drawMap(); }
   if (n.frame && (has('wt') || has('wsz'))) frame(n);
 }
 
@@ -411,20 +418,118 @@ function layout(n) {
 
 // ---- scrolling
 
+// The two sides lay text out in different widths, so a view is kept the same by what is at its top and not by a
+// number of pixels. A place is what the app sends as `sy`: 0 for the very start, else [node, block or line of
+// its text (-1: it has none), how far down that is, from 0 to 1].
+const BLOCKS = 'p,h1,h2,h3,h4,h5,h6,pre,hr,li:not(:has(> pre))';  // each of these is one block of Qt's document
+
+// A view changed size or came into view: its text moved under it.
+const sized = new ResizeObserver(entries => {
+  for (const entry of entries) {
+    const n = entry.target._n, view = scrollers.has(n) ? n : entry.target.parentElement && entry.target.parentElement._n;
+    if (view) view.again = true;
+  }
+  pin();
+});
+
 function track(n, el) {
   if (n.tracked) return;
   n.tracked = true;
   n.pin = true;  // the viewer is at the end (and stays there as text arrives) until they scroll away
   scrollers.add(n);
-  el.addEventListener('scroll', () => { n.pin = el.scrollHeight - el.clientHeight - el.scrollTop < 28; }, {passive: true});
+  sized.observe(el);
+  const hand = () => { n.hand = performance.now(); };
+  el.addEventListener('wheel', hand, {passive: true});
+  el.addEventListener('touchmove', hand, {passive: true});
+  el.addEventListener('keydown', hand, {passive: true});
+  el.addEventListener('pointerdown', () => { n.held = true; hand(); }, {passive: true});  // the scroll bar is in here too
+  el.addEventListener('scroll', () => {
+    n.pin = el.scrollHeight - el.clientHeight - el.scrollTop < 28;
+    if (!n.held && performance.now() - (n.hand || 0) >= HAND_MS) return;  // the text changed, or the app moved it
+    hand();
+    tell(n);
+  }, {passive: true});
 }
 
-// Where the app itself follows the end of a text, the viewer does too.
+function letGo() { for (const n of scrollers) n.held = false; }
+
+function busy(n) { return n.held || performance.now() - (n.hand || 0) < QUIET_MS; }
+
+function partsOf(n) {
+  if (n.k === 'code') return n.src.children;
+  if (n.k !== 'rich') return null;
+  return n.blocks || (n.blocks = [...n.el.querySelectorAll(BLOCKS)]);
+}
+
+// A big text is not sent on every change, so the page can hold fewer blocks than the app for a moment.
+function blocksPerPart(n, parts) { return n.k === 'rich' && n.p.bc ? n.p.bc / parts.length : 1; }
+
+function viewTop(el) { return el.getBoundingClientRect().top + el.clientTop; }
+
+// A list item holds the list nested in it, whose items are blocks of their own.
+function partBox(el) {
+  const box = el.getBoundingClientRect(), nested = el.tagName === 'LI' && el.querySelector(':scope > ul, :scope > ol');
+  if (!nested) return box;
+  const end = nested.getBoundingClientRect().top;
+  return {top: box.top, bottom: end, height: end - box.top};
+}
+
+// How far down the content of view `n` a place is, in pixels of this page.
+function offsetOf(n, at) {
+  const c = N.get(at[0]);
+  if (!c || !c.el) return null;
+  const parts = partsOf(c);
+  let box = null;
+  if (at[1] >= 0 && parts && parts.length) box = partBox(parts[Math.min(Math.round(at[1] / blocksPerPart(c, parts)), parts.length - 1)]);
+  else box = c.el.getBoundingClientRect();
+  return box.height ? n.el.scrollTop + box.top + at[2] * box.height - viewTop(n.el) : null;
+}
+
+// The place at the top of view `n`: down through what is there to the text it lies in.
+function placeOf(n) {
+  const y = viewTop(n.el), far = box => Math.round(Math.min(1, Math.max(0, (y - box.top) / (box.height || 1))) * 1e4) / 1e4;
+  let here = n.el, at = n;
+  while (here) {
+    if (here._n) at = here._n;
+    const parts = here._n ? partsOf(here._n) : null;
+    if (parts && parts.length) {
+      let lo = 0, hi = parts.length - 1;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (partBox(parts[mid]).bottom > y) hi = mid; else lo = mid + 1;
+      }
+      return [at.id, Math.round(lo * blocksPerPart(at, parts)), far(partBox(parts[lo]))];
+    }
+    here = [...here.children].find(kid => { const box = kid.getBoundingClientRect(); return box.height && box.bottom > y; });
+  }
+  return [at.id, -1, far(at.el.getBoundingClientRect())];
+}
+
+function tell(n) {
+  if (n.telling) return;
+  n.telling = setTimeout(() => {
+    n.telling = 0;
+    if (N.get(n.id) !== n) return;
+    const el = n.el, max = el.scrollHeight - el.clientHeight;
+    if (el.scrollTop <= 0) cmd(['y', n.id, 0]);
+    else if (el.scrollTop >= max - 1) cmd(['y', n.id, -1]);
+    else cmd(['y', n.id, ...placeOf(n)]);
+  }, SCROLL_MS);
+}
+
+// Show what the app shows, unless the viewer has the view in hand right now.
 function pin() {
   for (const n of scrollers) {
-    if (!n.p.end || !n.pin || !n.el.clientHeight) continue;
-    const max = n.el.scrollHeight - n.el.clientHeight;
-    if (n.el.scrollTop < max - 1) n.el.scrollTop = max;
+    const el = n.el;
+    if (!el.clientHeight) { n.again = true; continue; }  // not on show: put right as soon as it is
+    const max = el.scrollHeight - el.clientHeight;
+    if (n.p.sy != null) {
+      if (!n.again) continue;
+      n.again = false;
+      if (busy(n)) continue;
+      const to = n.p.end ? max : n.p.sy === 0 ? 0 : offsetOf(n, n.p.sy);
+      if (to != null && Math.abs(el.scrollTop - to) > 1) el.scrollTop = to;
+    } else if (n.p.end && n.pin && el.scrollTop < max - 1) el.scrollTop = max;  // a tab that is not open in the app
   }
 }
 
@@ -648,7 +753,7 @@ const KIND = {
     upd(n, p, has) {
       if (has('ch')) {
         const c = N.get((p.ch || [])[0]);
-        if (c) c.el.style.flex = '';
+        if (c) { c.el.style.flex = ''; sized.observe(c.el); }  // what is inside grows here at its own pace
         sync(n.el, c ? [c.el] : []);
       }
       if (has('fit')) n.el.classList.toggle('fit', !!p.fit);
@@ -728,6 +833,7 @@ const KIND = {
       if (has('html')) {
         if (keys && n.app != null) n.el.insertAdjacentHTML('beforeend', n.app);
         else n.el.innerHTML = p.html || '';
+        n.blocks = null;
       }
       n.app = null;
     },
@@ -735,18 +841,17 @@ const KIND = {
   code: {
     make(n) {
       const el = $('div');
-      n.gut = $('pre', 'gut'); n.src = $('pre', 'src');
-      el.append(n.gut, n.src);
+      n.src = $('pre', 'src');
+      el.append(n.src);
       track(n, el);
       return el;
     },
     upd(n, p, has) {
-      if (has('html')) n.src.innerHTML = p.html || '';
+      // A line of its own: its number stays beside it when it wraps, and it can be scrolled to.
+      if (has('html')) n.src.innerHTML = (p.html || '').split('\n').map(line => `<div class="cl">${line || '<br>'}</div>`).join('');
       if (has('ln')) {
-        let numbers = '';
-        for (let i = 1; i <= (p.ln || 0); i++) numbers += i + '\n';
-        n.gut.textContent = numbers;
-        n.gut.classList.toggle('hid', !p.ln);
+        n.el.classList.toggle('ln', !!p.ln);
+        n.el.style.setProperty('--gw', String(p.ln || 0).length + 'ch');
       }
       if (has('wr')) n.el.classList.toggle('wr', !!p.wr);
       n.app = null;
@@ -1143,6 +1248,119 @@ function placeRoots() {
   sync(layersEl, want);
 }
 
+// ---- where the app is on its PC: the monitors to scale, with the window on them to drag and resize
+
+const mapEl = document.getElementById('map'), mapBtn = document.getElementById('mapbtn');
+const mapInfo = document.getElementById('mapinfo'), mapStage = document.getElementById('mapstage');
+const mapWin = $('div');
+const wm = {node: null, geo: null, scale: 1, pad: 0, left: 0, top: 0, right: 0, bottom: 0, drawn: '', drag: null, sending: 0, done: 0};
+mapWin.id = 'mapwin';
+for (const edge of ['n', 'e', 's', 'w', 'ne', 'nw', 'se', 'sw']) {
+  const handle = $('div', 'map-h');
+  handle.dataset.e = edge;
+  mapWin.append(handle);
+}
+
+function showMap(open) {
+  mapEl.classList.toggle('hid', !open);
+  mapBtn.classList.toggle('on', open);
+  try { localStorage.setItem('sc-map', open ? '1' : ''); } catch (e) { /* only the choice is lost */ }
+  drawMap();
+}
+
+function mapSpot(el, r) {
+  const s = el.style;
+  s.left = wm.pad + (r[0] - wm.left) * wm.scale + 'px';
+  s.top = (r[1] - wm.top) * wm.scale + 'px';
+  s.width = r[2] * wm.scale + 'px';
+  s.height = r[3] * wm.scale + 'px';
+}
+
+function drawMap() {
+  const g = wm.geo;
+  if (!g || mapEl.classList.contains('hid')) return;
+  const wide = mapStage.clientWidth, drawn = JSON.stringify(g.m) + wide;
+  if (drawn !== wm.drawn) {  // and only then: taking the window off the map would end a drag
+    wm.drawn = drawn;
+    wm.left = Math.min(...g.m.map(s => s[0]));
+    wm.top = Math.min(...g.m.map(s => s[1]));
+    wm.right = Math.max(...g.m.map(s => s[0] + s[2]));
+    wm.bottom = Math.max(...g.m.map(s => s[1] + s[3]));
+    wm.scale = Math.min(wide / (wm.right - wm.left), MAP_HIGH / (wm.bottom - wm.top));
+    wm.pad = (wide - (wm.right - wm.left) * wm.scale) / 2;
+    mapStage.style.height = Math.round((wm.bottom - wm.top) * wm.scale) + 'px';
+    mapStage.replaceChildren(...g.m.map((s, i) => {
+      const tile = $('div', 'map-scr' + (s[4] ? ' pri' : ''));
+      tile.textContent = `${i + 1}  ·  ${s[2]} × ${s[3]}`;
+      mapSpot(tile, s);
+      return tile;
+    }), mapWin);
+  }
+  drawWin();
+}
+
+function drawWin() {
+  const g = wm.geo, r = wm.drag ? wm.drag.now : g.r, x = r[0] + r[2] / 2, y = r[1] + r[3] / 2;
+  mapSpot(mapWin, r);
+  mapWin.classList.toggle('min', g.st === 'min');
+  const on = Math.max(0, g.m.findIndex(s => x >= s[0] && x < s[0] + s[2] && y >= s[1] && y < s[1] + s[3])), s = g.m[on];
+  const state = {min: ' (minimized)', max: ' (maximized)', full: ' (full screen)'}[g.st] || '';
+  mapInfo.textContent = `Monitor ${on + 1}: x ${r[0] - s[0]}, y ${r[1] - s[1]}, ${r[2]} × ${r[3]}${state}`;
+}
+
+function limit(value, low, high) { return Math.max(low, Math.min(value, high)); }
+
+function dragged(d, dx, dy) {
+  let [x, y, w, h] = d.from;
+  const [leastW, leastH] = wm.geo.min, how = d.how;
+  if (!how) {
+    x = limit(x + dx, wm.left, wm.right - w);
+    y = limit(y + dy, wm.top, wm.bottom - h);
+  } else {
+    if (how.includes('e')) w = limit(w + dx, leastW, wm.right - x);
+    if (how.includes('s')) h = limit(h + dy, leastH, wm.bottom - y);
+    if (how.includes('w')) { const end = x + w; x = limit(x + dx, wm.left, end - leastW); w = end - x; }
+    if (how.includes('n')) { const end = y + h; y = limit(y + dy, wm.top, end - leastH); h = end - y; }
+  }
+  return [x, y, w, h].map(Math.round);
+}
+
+function sendWin() {
+  clearTimeout(wm.sending);
+  wm.sending = 0;
+  const d = wm.drag;
+  if (d && wm.node && d.now.some((value, i) => value !== d.shown[i])) cmd(['w', wm.node.id, ...d.now]);
+}
+
+function dropWin() {
+  if (!wm.drag) return;
+  sendWin();
+  wm.done = setTimeout(() => { wm.drag = null; drawWin(); }, QUIET_MS);  // the app's answer is on its way: no jump back first
+}
+
+mapWin.addEventListener('pointerdown', ev => {
+  if (!wm.geo) return;
+  ev.preventDefault();
+  clearTimeout(wm.done);
+  mapWin.setPointerCapture(ev.pointerId);
+  const g = wm.geo, from = (wm.drag ? wm.drag.now : g.r).slice(), shown = from.slice();
+  if (g.st === 'max' || g.st === 'full') { from[2] = g.n[0]; from[3] = g.n[1]; }  // comes off at its own size
+  wm.drag = {x: ev.clientX, y: ev.clientY, from, shown, now: shown, how: ev.target.dataset.e || ''};
+});
+mapWin.addEventListener('pointermove', ev => {
+  const d = wm.drag;
+  if (!d || !mapWin.hasPointerCapture(ev.pointerId)) return;
+  d.now = dragged(d, (ev.clientX - d.x) / wm.scale, (ev.clientY - d.y) / wm.scale);
+  drawWin();
+  if (!wm.sending) wm.sending = setTimeout(sendWin, SCROLL_MS);
+});
+mapWin.addEventListener('pointerup', dropWin);
+mapWin.addEventListener('pointercancel', dropWin);
+mapBtn.addEventListener('click', () => showMap(mapEl.classList.contains('hid')));
+document.getElementById('mapx').addEventListener('click', () => showMap(false));
+window.addEventListener('resize', drawMap);
+try { showMap(localStorage.getItem('sc-map') === '1'); } catch (e) { /* closed until asked for */ }
+
 // ---- things that concern the page as a whole
 
 function topWindow() { return roots.length > 1 ? N.get(roots[roots.length - 1]) : null; }
@@ -1169,8 +1387,14 @@ document.addEventListener('keydown', ev => {
   }
 });
 
-document.addEventListener('pointermove', ev => { pointer = {x: ev.clientX, y: ev.clientY}; hovered = ev.target; }, {passive: true});
+document.addEventListener('pointermove', ev => {
+  pointer = {x: ev.clientX, y: ev.clientY};
+  hovered = ev.target;
+  if (!ev.buttons) letGo();  // letting go of a scroll bar is not always reported as such
+}, {passive: true});
 document.addEventListener('pointerdown', ev => { pointer = {x: ev.clientX, y: ev.clientY}; hovered = ev.target; }, true);
+window.addEventListener('pointerup', letGo, true);
+window.addEventListener('pointercancel', letGo, true);
 
 function nodeAt(el) {
   const w = el && el.closest ? el.closest('.w') : null;
