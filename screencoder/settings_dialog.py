@@ -59,6 +59,12 @@ class SettingsDialog(QDialog):
         self.cli_status.setWordWrap(True)
         self.cli_status.setStyleSheet("color:#9aa4b2;")
 
+        # A name for the AI developer (coding agent + quick answers), so the interviewer can address it by name.
+        self.dev_name = QLineEdit(getattr(settings, "dev_name", ""))
+        self.dev_name.setPlaceholderText("e.g. Alex Carter — what the interviewer calls you (optional)")
+        self.dev_name.setToolTip("A name for the AI developer: the coding agent and the quick answers. The person "
+                                 "talking to you may call you by it. Leave empty for no name.")
+
         # API keys for the OpenAI and Anthropic providers (hidden as you type; "Test" makes one tiny call).
         self.openai_key = QLineEdit(settings.openai_key)
         self.openai_key.setEchoMode(QLineEdit.EchoMode.Password)
@@ -171,6 +177,7 @@ class SettingsDialog(QDialog):
         form = QFormLayout()
         form.addRow("Claude Code CLI", cli_row)
         form.addRow("", self.cli_status)
+        form.addRow("Developer name", self.dev_name)
         form.addRow(self._heading("AI providers"))
         form.addRow("OpenAI API key", self._key_row(self.openai_key, llm.OPENAI))
         form.addRow("Anthropic API key", self._key_row(self.anthropic_key, llm.ANTHROPIC))
@@ -366,6 +373,7 @@ class SettingsDialog(QDialog):
     def apply(self) -> None:
         s = self.settings
         s.claude_path = self.cli_edit.text().strip()
+        s.dev_name = self.dev_name.text().strip()
         s.openai_key = self.openai_key.text().strip()
         s.anthropic_key = self.anthropic_key.text().strip()
         s.openai_models = [m.strip() for m in self.openai_models_edit.text().split(",") if m.strip()] or s.openai_models

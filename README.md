@@ -40,7 +40,7 @@ The window has the question-and-answer panel on the left and the code side on th
 
    Pick the **Language** for the solution. Python is the default.
    - **Other** follows the language of the problem.
-   - **Non-coding** means the developer writes no code himself: he directs your own coding agent. See [Directing an external coding agent](#directing-an-external-coding-agent-language-non-coding).
+   - **Vibe-Coding** means the developer writes no code himself: he directs your own coding agent. See [Directing an external coding agent](#directing-an-external-coding-agent-language-vibe-coding).
 2. Press **Analyze & Solve** (Ctrl+Enter). The task box disappears; **＋ New task** in the toolbar starts over for the next problem.
    - **＋ New task** asks for confirmation first. On "Yes" it stops the current task if one is running and clears everything on screen: the plan, the prompts, the activity log, the files view, and the whole Q&A panel (transcript, attachments and chat).
    - It also empties the **Workspace** path, so set it again for the next task.
@@ -106,12 +106,12 @@ Every button is enabled only while what it does is possible:
 | **↻ Revise plan** | the plan is waiting for approval and feedback has been typed |
 | **↻ Refresh** / **📋 Copy code** (Files) | a task exists / a file is open |
 | **✋ Interrupt** / **■ Stop** | the session is in the middle of a turn / is running |
-| **✅ Agent finished** / **⏳ Agent still working** | a Non-coding session is running and he has written a prompt |
+| **✅ Agent finished** / **⏳ Agent still working** | a Vibe-Coding session is running and he has written a prompt |
 | **✔ Sent to the agent** (on each prompt) | it is the newest prompt and has not been marked as sent yet |
 
-## Directing an external coding agent (Language: Non-coding)
+## Directing an external coding agent (Language: Vibe-Coding)
 
-With **Non-coding** the developer in this app writes no code. A coding agent outside the app (Claude Code, Cursor, Copilot, anything) writes it, and the developer directs that agent. Three parties are involved:
+With **Vibe-Coding** the developer in this app writes no code. A coding agent outside the app (Claude Code, Cursor, Copilot, anything) writes it, and the developer directs that agent. Three parties are involved:
 
 - **The supervisor** is whoever is heard on the PC audio. They set the developer this task to assess how he works; he explains himself to them and answers their questions.
 - **The external coding agent** only ever receives the prompts the developer writes.
@@ -123,12 +123,12 @@ How the developer talks:
 - The task is his own assignment: he says "I", never "we".
 - He calls the external coding agent "the agent".
 - You do not exist in anything he says or writes. Passing a prompt on and running a command are his own actions to him: "I'm sending this to the agent", "I'll run the tests now".
-- In every mode, coding or Non-coding, he is briefed to sound like a professional engineer talking about his own work.
+- In every mode, coding or Vibe-Coding, he is briefed to sound like a professional engineer talking about his own work.
 
 Setting up:
 
 1. Put the folder your coding agent works in into **Workspace** (toolbar). The developer can read it at any time to see what the agent has made. Leave it empty if there is no folder to share; he then only knows what you show him.
-2. Add the task, pick **Non-coding**, press **Analyze & Solve**.
+2. Add the task, pick **Vibe-Coding**, press **Analyze & Solve**.
 
 Where things appear:
 
@@ -152,7 +152,7 @@ What happens, turn by turn:
    - Only the newest prompt can be marked as sent; the button then shows the time. If you click it while he is still writing the turn, those parts appear as he writes them.
    - If you skip the click and report on the agent with **Agent finished** or **Agent still working**, the prompt is marked as sent and the held-back parts are dropped, since their moment has passed.
 4. **Show him how the agent is doing**, in the status field under the tabs.
-   - Add screenshots of the agent's latest activity: its chat, its action history, a terminal. The field has its own **Snip**, **Screen**, **Files** and **Paste** buttons, and **Ctrl+V** pastes into it. While a Non-coding task runs, the global capture hotkeys also put their screenshots here. He is told that these screenshots are the agent's latest activity, so nothing has to be explained. A line of text ("pytest: 3 passed, 1 failed") is optional.
+   - Add screenshots of the agent's latest activity: its chat, its action history, a terminal. The field has its own **Snip**, **Screen**, **Files** and **Paste** buttons, and **Ctrl+V** pastes into it. While a Vibe-Coding task runs, the global capture hotkeys also put their screenshots here. He is told that these screenshots are the agent's latest activity, so nothing has to be explained. A line of text ("pytest: 3 passed, 1 failed") is optional.
    - Then say where the agent stands, with one of two buttons. Both work with only a screenshot, only text, or nothing added at all.
      - **✅ Agent finished:** the agent has completed its turn for his latest prompt. He reads what it wrote in the workspace, checks it against what its activity says it did, and reviews it in the left panel.
      - **⏳ Agent still working:** the agent has not finished. He takes the screenshots in and looks at the workspace, so that he knows how far it is. He speaks in the left panel only if that already gives him something worth saying; otherwise he stays quiet, and the status is marked "taken in - nothing to say yet" in the chat.
@@ -187,7 +187,7 @@ Each developer turn costs one round of the coding model. If the turns feel slow,
     - His coding session gets the same information when it replies in the chat to a request you pass on.
     - When his session finishes, his own tab says nothing about it. The status bar and the Coding activity tab tell you that the changes are waiting in his copy.
   - A folder that does not exist is refused instead of being created.
-- With **Non-coding** there is no copy: the folder belongs to your external agent and the developer's session only has read access to it.
+- With **Vibe-Coding** there is no copy: the folder belongs to your external agent and the developer's session only has read access to it.
 - Each run stores its inputs, plan, event log and session ID under `~/ScreenCoder/runs/<id>/`. You can continue a session in a terminal with `claude --resume <session-id>`.
 - **Coding permissions** (Settings). The agent runs headless, so nobody can approve prompts:
   - `acceptEdits` (default): it can write files, but shell commands are denied, so it verifies by tracing the examples by hand. Edits outside its working directory are denied too.
@@ -253,6 +253,7 @@ Settings let you change:
 - the reading text size for the plan, coding activity, transcript and chat (150% by default);
 - the speech model: Kroko (recommended: lightest, adds punctuation) or NVIDIA FastConformer, and whether PC-audio listening is on;
 - the coding model and effort, and the quick-answer model and effort (Haiku is supported; effort isn't sent for it);
+- a name for the AI developer (the coding agent and quick answers), so the interviewer can address it by name;
 - the CLI path;
 - the runs folder;
 - whether thinking summaries are shown;
@@ -277,7 +278,7 @@ With **OpenAI** or **Anthropic**, that part runs as an agent over the API with t
 
 | File | Purpose |
 |---|---|
-| `screencoder/main_window.py` | UI and the analyze → plan → code flow, the Non-coding flow (directing an external agent), quick answers and steering |
+| `screencoder/main_window.py` | UI and the analyze → plan → code flow, the Vibe-Coding flow (directing an external agent), quick answers and steering |
 | `screencoder/claude_cli.py` | `claude -p` stream-json session: streaming, interrupts, message queue tracking |
 | `screencoder/prompts.py` | Prompts for the coding agent, for the developer who directs an external agent, and for the quick-answer model |
 | `screencoder/attachments.py`, `images.py` | Screenshot encoding within API limits, duplicate detection, message content |

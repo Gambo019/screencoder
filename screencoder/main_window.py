@@ -127,7 +127,7 @@ Capture as many screenshots as you need to cover the code - overlaps and repeats
 the question; add screenshots or files to go with it. **Ask** gets an instant answer from the fast model without \
 disturbing the agent. **Send to agent** gives the same thing to the coding agent as a new instruction.
 
-**Language: Non-coding** - the developer writes no code. He asks his questions here, then directs your own \
+**Language: Vibe-Coding** - the developer writes no code. He asks his questions here, then directs your own \
 coding agent: what he says is in the panel on the left, and the prompts he writes are on the **Prompts** tab, \
 with the parts you can copy from the agent's files marked. Put the agent's folder in **Workspace** so he can \
 read its files; you pass the prompts on and run things for him.
@@ -560,7 +560,7 @@ class MainWindow(QMainWindow):
                                 "code locally.\nYour folder is never changed: the developer works on a copy of it "
                                 "(edits and runs happen only there), you bring his changes over yourself, and quick "
                                 "answers are given from your folder as it is at that moment.\n"
-                                "With Language \"Non-coding\": the folder your own coding agent works in - "
+                                "With Language \"Vibe-Coding\": the folder your own coding agent works in - "
                                 "the developer only reads it.")
         tb.addWidget(self.ws_edit)
         self.browse_action = self._action("Browse…", self._browse_workspace, "Choose the workspace folder")
@@ -598,7 +598,7 @@ class MainWindow(QMainWindow):
         self.lang_combo.addItems(LANGUAGES)
         self.lang_combo.setCurrentText(self.settings.language if self.settings.language in LANGUAGES else "Python")
         self.lang_combo.setToolTip("Language for the solution. \"Other\" follows the language of the problem.\n"
-                                   "\"Non-coding\": the developer writes no code - he plans, writes the prompts "
+                                   "\"Vibe-Coding\": the developer writes no code - he plans, writes the prompts "
                                    "for your own coding agent and reviews what it produces.")
         self.start_btn = QPushButton("▶  Analyze && Solve")
         self.start_btn.setObjectName("primary")
@@ -609,7 +609,7 @@ class MainWindow(QMainWindow):
         row.addWidget(self.lang_combo)
         row.addWidget(self.review_check)
         row.addWidget(self.start_btn)
-        self.mode_hint = QLabel("Non-coding: the developer writes no code. He asks his questions, plans, writes the "
+        self.mode_hint = QLabel("Vibe-Coding: the developer writes no code. He asks his questions, plans, writes the "
                                 "prompts for your own coding agent and reviews what it produces. Put that agent's "
                                 "folder in Workspace (toolbar) so he can read its files.")
         self.mode_hint.setWordWrap(True)
@@ -1268,7 +1268,7 @@ class MainWindow(QMainWindow):
         # Directing: read-only tools, so there is nothing to write with and nothing to run.
         tools = "Read,Glob,Grep" if directing else None
         permission_mode = None if directing else s.permission_mode
-        system = prompts.LEAD_SYSTEM if directing else prompts.MAIN_SYSTEM
+        system = (prompts.LEAD_SYSTEM if directing else prompts.MAIN_SYSTEM) + prompts.name_note(s.dev_name)
         if s.coding_provider == llm.CLAUDE_CODE:
             session = ClaudeSession(
                 claude_path=claude,
@@ -1991,7 +1991,7 @@ class MainWindow(QMainWindow):
         any prompt there is no agent at work, and this lets him go ahead on his own assumptions instead.
         """
         if not (self.main and self.main.running and self._directing()):
-            self._notice("No developer session is running - start a Non-coding task first.")
+            self._notice("No developer session is running - start a Vibe-Coding task first.")
             return
         note, attachments = self.status.take()
         latest = len(self.run.prompts)
@@ -2229,6 +2229,7 @@ class MainWindow(QMainWindow):
             cwd = cwd.resolve()
         system = (prompts.LEAD_SIDE_SYSTEM if self._directing() else
                   prompts.SIDE_SYSTEM_GIVEN if self.run and self.run.given else prompts.SIDE_SYSTEM)
+        system += prompts.name_note(s.dev_name)
         log_path = self.run.dir / "quick_answers.jsonl" if self.run else None
         if provider == llm.CLAUDE_CODE:
             side = ClaudeSession(

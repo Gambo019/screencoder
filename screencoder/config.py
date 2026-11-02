@@ -17,9 +17,9 @@ SETTINGS_FILE = HOME_DIR / "settings.json"
 CODING_MODELS = ["claude-opus-4-8", "claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1"]
 SIDE_MODELS = ["claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5", "claude-sonnet-5-5"]
 EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"]
-# Task language choices. "Other" lets the agent follow the problem. With "Non-coding" the developer writes no
+# Task language choices. "Other" lets the agent follow the problem. With "Vibe-Coding" the developer writes no
 # code himself: he directs a coding agent outside this app (plans, writes its prompts, reviews its work).
-LANG_OTHER, LANG_NON_CODING = "Other", "Non-coding"
+LANG_OTHER, LANG_NON_CODING = "Other", "Vibe-Coding"  # constant name is historical; the shown label is Vibe-Coding
 LANGUAGES = ["Python", "JavaScript", "TypeScript", "C#", "Java", "C", "C++", "Go", LANG_OTHER, LANG_NON_CODING]
 TEXT_SCALES = [1.0, 1.15, 1.25, 1.35, 1.5, 1.75, 2.0, 2.5]
 PERMISSION_MODES = {
@@ -48,6 +48,9 @@ class Settings:
     permission_mode: str = "acceptEdits"
     review_plan: bool = False
     language: str = "Python"
+    # A name for the AI developer (coding agent + quick answers). The person talking to it (the interviewer)
+    # may address it by this name; empty means no name. Woven into the system prompt (see prompts.name_note).
+    dev_name: str = ""
     # Size of the plan, activity, transcript and chat text (1.0 = normal UI text). Named differently from the
     # first version of this setting ("text_scale", default 2.0) so that old saved value no longer applies.
     reading_scale: float = 1.5
@@ -85,6 +88,8 @@ class Settings:
         for key, value in data.items():
             if key in known and isinstance(value, type(getattr(settings, key))):
                 setattr(settings, key, value)
+        if settings.language == "Non-coding":  # the label was renamed to "Vibe-Coding"
+            settings.language = LANG_NON_CODING
         return settings
 
     def save(self) -> None:

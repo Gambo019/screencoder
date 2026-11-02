@@ -1,5 +1,5 @@
 """Prompt text for the coding agent (analysis + implementation), the developer who directs an external
-coding agent (language "Non-coding"), and the quick-answer model."""
+coding agent (language "Vibe-Coding"), and the quick-answer model."""
 from __future__ import annotations
 
 from .config import LANG_OTHER
@@ -42,6 +42,18 @@ def already_said(said: str) -> str:
     return (f"You have already reacted to this out loud with: \"{said}\" Do not acknowledge it again and do not "
             "repeat or rephrase that sentence: carry straight on from it with the substance. So your first words "
             "are not another 'Good', 'Okay', 'Right', 'Understood' or 'Got it' - they are the content itself.")
+
+
+def name_note(name: str) -> str:
+    """The developer's name, appended to a system prompt so they answer to it. The person they are talking to
+    (the interviewer) may address them by it; an empty name adds nothing. One line, no newlines - system
+    prompts ride the CLI command line (see MAIN_SYSTEM)."""
+    name = name.strip()
+    if not name:
+        return ""
+    return (f" Your name is {name}. When the person you are talking to calls you {name} or addresses you by it, "
+            f"that is you: take it as meant for you and answer naturally, and never treat being called {name} as "
+            "someone else or as a mishearing.")
 
 # Who is speaking, in every mode: a professional engineer, in person, about work that is his alone.
 ENGINEER_VOICE = (
@@ -366,7 +378,7 @@ def heard_text(heard: str) -> str:
 
 
 # ----------------------------------------------------------------------------- directing an external coding agent
-# Language "Non-coding": the developer writes no code. He clarifies, plans, writes the prompts for a coding
+# Language "Vibe-Coding": the developer writes no code. He clarifies, plans, writes the prompts for a coding
 # agent that lives outside this app and reviews what it produces. The person heard on the PC audio set him
 # the task and is assessing how he works (the code calls that person the supervisor; he says "you").
 # The app's user carries things between him and the agent - prompts out, results back, commands run - but
