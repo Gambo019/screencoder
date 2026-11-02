@@ -250,7 +250,14 @@ class Composer(QWidget):
         self.tray = QScrollArea()
         self.tray.setWidget(self._tray_inner)
         self.tray.setWidgetResizable(True)
-        self.tray.setFixedHeight(124)
+        # Up to 124 px tall, but allowed to shrink when the panel is short. A fixed height here used to push
+        # the Snip/Screen/Files buttons below it into the tray's own rectangle on a short window, where the
+        # scroll area sat on top of them and swallowed the clicks. Shrinking the strip keeps the buttons below.
+        self.tray.setMaximumHeight(124)
+        self.tray.setMinimumHeight(0)
+        _tray_policy = self.tray.sizePolicy()
+        _tray_policy.setVerticalPolicy(QSizePolicy.Policy.Maximum)
+        self.tray.setSizePolicy(_tray_policy)
         self.tray.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.tray.setFrameShape(QFrame.Shape.NoFrame)
         self.tray.hide()
