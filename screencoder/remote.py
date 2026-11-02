@@ -946,6 +946,7 @@ class Mirror(QObject):
             props["end"] = 1  # this side follows the end of the text, so the viewer's does too
         if w.isVisible():  # a tab not open here says nothing: a viewer on it (sync off) scrolls it on their own
             props["sy"] = self._top_of(node, w, value)
+            props["sm"] = self._top_of(node, w, end)  # how far this view goes: the page's must go as far (fit() there)
 
     def _top_of(self, node, w, value: int):
         """What the top of a scrolled view shows, by its content and not in pixels: the other side lays the text

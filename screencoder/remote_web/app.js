@@ -305,7 +305,7 @@ function update(n, keys) {
   if (has('mx')) { s.maxWidth = p.mx && p.mx[0] ? p.mx[0] + 'px' : ''; s.maxHeight = p.mx && p.mx[1] ? p.mx[1] + 'px' : ''; }
   if (has('ss')) sheet(n);  // after the sizes and fonts: what the widget styles itself has the last word
   KIND[n.k].upd(n, p, has, keys);
-  if (has('sy') || has('end') || has('html')) n.again = true;
+  if (has('sy') || has('sm') || has('end') || has('html')) n.again = true;
   if (has('geo') && p.geo) { wm.node = n; wm.geo = p.geo; mapBtn.classList.remove('hid'); drawMap(); }
   if (n.frame && (has('wt') || has('wsz'))) frame(n);
 }
@@ -520,16 +520,29 @@ function tell(n) {
   }, SCROLL_MS);
 }
 
+// This view can be taller than the app's and hold all of the text while the app still has to scroll it. It then gets
+// room under the text, as much as it takes to scroll as far as the app can, so it has a scroll bar whenever the app has.
+function fit(n) {
+  const el = n.el, last = n.p.sm ? offsetOf(n, n.p.sm) : 0;
+  if (last == null) return;
+  // Where the text ends. scrollHeight will not do for a text shorter than the view: it says the height of the view.
+  const parts = partsOf(n), tail = parts && parts[parts.length - 1];
+  const end = tail ? el.scrollTop + tail.getBoundingClientRect().bottom - viewTop(el) : el.scrollHeight - (n.room || 0);
+  const room = last ? Math.max(0, Math.ceil(last + el.clientHeight - end)) : 0;
+  if (room !== (n.room || 0)) { n.room = room; el.style.setProperty('--room', room + 'px'); }
+}
+
 // Show what the app shows, unless the viewer has the view in hand right now.
 function pin() {
   for (const n of scrollers) {
     const el = n.el;
     if (!el.clientHeight) { n.again = true; continue; }  // not on show: put right as soon as it is
+    const again = n.again;
+    n.again = false;
+    if (again) fit(n);
     const max = el.scrollHeight - el.clientHeight;
     if (n.p.sy != null) {
-      if (!n.again) continue;
-      n.again = false;
-      if (busy(n)) continue;
+      if (!again || busy(n)) continue;
       const to = n.p.end ? max : n.p.sy === 0 ? 0 : offsetOf(n, n.p.sy);
       if (to != null && Math.abs(el.scrollTop - to) > 1) el.scrollTop = to;
     } else if (n.p.end && n.pin && el.scrollTop < max - 1) el.scrollTop = max;  // a tab that is not open in the app
