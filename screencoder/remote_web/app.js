@@ -663,6 +663,8 @@ function showTab(n, cur) {
     });
     return tab;
   }));
+  const beside = N.get(p.cn);  // what the app has at the end of its tab row comes right after the tabs here
+  if (beside) n.bar.append(beside.el);
   (p.ch || []).forEach((id, i) => { const c = N.get(id); if (c) c.el.classList.toggle('off', i !== cur); });
 }
 
@@ -740,7 +742,7 @@ const KIND = {
         }
         sync(n.stack, want);
       }
-      if (has('tabs') || has('cur') || has('ch') || has('sync')) {
+      if (has('tabs') || has('cur') || has('ch') || has('sync') || has('cn')) {
         if (p.sync) n.localCur = p.cur;  // in sync: follow the app, and snap to it the moment sync is turned on
         else if (n.localCur == null) n.localCur = p.cur;  // first paint while unsynced: start from the app's tab
         showTab(n, p.sync ? p.cur : n.localCur);

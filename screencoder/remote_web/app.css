@@ -58,6 +58,7 @@ body.stale #root, body.stale #layers { opacity: .45; pointer-events: none; }
 .tab.sel { background: var(--window); color: var(--text); margin-top: 0; padding-top: 6px; position: relative;
   top: 1px; }
 .tab.dis { opacity: .5; cursor: default; }
+.tabbar > .k-chk { flex: 0 0 auto; align-self: center; margin-left: 10px; white-space: nowrap; }
 .stack { flex: 1 1 0; display: flex; border: 1px solid var(--line); border-top: none; }
 .stack > .w { flex: 1 1 0; }
 

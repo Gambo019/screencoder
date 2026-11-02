@@ -752,12 +752,12 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.prompts_view, "Prompts")
         self.tabs.addTab(self.activity_view, "Coding activity")
         self.tabs.addTab(files_tab, "Output Code")
-        # A desktop-only toggle beside the last tab: when on, the open tab stays in step with everyone viewing
-        # from the web (and their tab clicks move it here); when off, each side browses the tabs on its own.
+        # At the end of the tab row, and on the remote page beside the last tab: when on, the open tab stays in step
+        # with everyone viewing from the web (and their tab clicks move it here); when off, each side browses the
+        # tabs on its own. Either side can switch it, and it is one box: the two always show the same.
         self.tab_sync = QCheckBox("Sync tab")
         self.tab_sync.setChecked(True)
         self.tab_sync.setToolTip("Keep the open tab in sync with the web viewers. Turn off to browse tabs separately.")
-        self.tab_sync.setProperty("remote_skip", True)  # the control itself is never drawn on the remote page
         self.tabs.setCornerWidget(self.tab_sync, Qt.Corner.TopRightCorner)
         code_side = QWidget()
         code_layout = QVBoxLayout(code_side)

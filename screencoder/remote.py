@@ -157,7 +157,7 @@ def _child_widgets(widget) -> list:
     found = []
     for child in widget.children():
         if child.isWidgetType() and not child.isWindow() and not isinstance(child, _SKIP) \
-                and not child.objectName().startswith("qt_") and not child.property("remote_skip"):
+                and not child.objectName().startswith("qt_"):
             found.append(child)
     return found
 
@@ -1238,8 +1238,10 @@ class Mirror(QObject):
                          w.tabToolTip(i)])
             pages.append(self._ref(w.widget(i), node))
         props["tabs"], props["cur"], props["ch"] = tabs, w.currentIndex(), pages
-        corner = w.cornerWidget(Qt.Corner.TopRightCorner)  # the desktop's "Sync tab" box, when present
+        corner = w.cornerWidget(Qt.Corner.TopRightCorner)  # the "Sync tab" box, when present: on the page too
         props["sync"] = 0 if isinstance(corner, QCheckBox) and not corner.isChecked() else 1
+        if corner is not None:
+            props["cn"] = self._ref(corner, node)
 
     def _d_split(self, node, w, props) -> None:
         horizontal = w.orientation() == Qt.Orientation.Horizontal
