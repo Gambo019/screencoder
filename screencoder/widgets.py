@@ -37,6 +37,7 @@ class FlowLayout(QLayout):
     def __init__(self, parent=None, spacing: int = 4):
         super().__init__(parent)
         self._items: list = []
+        self._last_width = 0  # width of the last setGeometry, so minimumSize can report the real wrapped height
         self.setContentsMargins(0, 0, 0, 0)
         self.setSpacing(spacing)
 
@@ -63,6 +64,11 @@ class FlowLayout(QLayout):
 
     def setGeometry(self, rect: QRect) -> None:
         super().setGeometry(rect)
+        if rect.width() != self._last_width:
+            # The number of rows (and so our minimum height) depends on the width; when it changes,
+            # re-propagate so the parent reserves room for every wrapped row instead of just one.
+            self._last_width = rect.width()
+            self.invalidate()
         self._arrange(rect, apply=True)
 
     def sizeHint(self) -> QSize:
@@ -72,6 +78,10 @@ class FlowLayout(QLayout):
         size = QSize()
         for item in self._items:
             size = size.expandedTo(item.minimumSize())
+        if self._last_width > 0:
+            # Reserve the height the buttons actually need at this width. Without it the layout keeps only
+            # one row's height, and a wrapped row spills past the panel's edge where it can no longer be clicked.
+            size.setHeight(max(size.height(), self.heightForWidth(self._last_width)))
         margins = self.contentsMargins()
         return size + QSize(margins.left() + margins.right(), margins.top() + margins.bottom())
 
@@ -341,18 +351,23 @@ class Composer(QWidget):
         if img is None or img.isNull():
             return False
         sig = images.exact_signature(img)
-        for existing in self._atts:
-            if existing.exact_sig == sig:
-                self.notice.emit(f"{self.title}: skipped a duplicate - identical to {existing.name}")
-                return False
         self._shot_counter += 1
         att = Attachment("image", name or f"Screenshot {self._shot_counter}", image=img, path=path,
                          exact_sig=sig, thumb=images.gray_thumbnail(img))
-        for existing in self._atts:
-            if existing.kind == "image" and images.near_duplicate(att.size, att.thumb, existing.size, existing.thumb):
-                att.near_dup_of = existing.name
-                self.notice.emit(f"{self.title}: {att.name} looks nearly identical to {existing.name}")
-                break
+        # A deliberate capture or paste is always kept, even when it matches an earlier attachment.
+        # Re-capturing an unchanged screen gives byte-identical pixels, and silently dropping that made the
+        # Snip/Screen/Paste buttons look dead ("I clicked but nothing was captured"). We still point out the
+        # resemblance - exact first, otherwise near - so an accidental double is easy to spot and remove.
+        twin = next((e for e in self._atts if e.exact_sig == sig), None)
+        if twin is not None:
+            att.near_dup_of = twin.name
+            self.notice.emit(f"{self.title}: {att.name} is identical to {twin.name}")
+        else:
+            near = next((e for e in self._atts if e.kind == "image"
+                         and images.near_duplicate(att.size, att.thumb, e.size, e.thumb)), None)
+            if near is not None:
+                att.near_dup_of = near.name
+                self.notice.emit(f"{self.title}: {att.name} looks nearly identical to {near.name}")
         self._atts.append(att)
         self._rebuild_tray()
         return True

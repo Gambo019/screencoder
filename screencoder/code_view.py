@@ -5,7 +5,9 @@ from pygments.lexers import get_lexer_for_filename
 from pygments.token import Comment, Keyword, Name, Number, Operator, String, Token
 from pygments.util import ClassNotFound
 from PySide6.QtCore import QRect, QSize, Qt
-from PySide6.QtGui import QColor, QFont, QFontDatabase, QPainter, QSyntaxHighlighter, QTextCharFormat
+from PySide6.QtGui import (
+    QColor, QFont, QFontDatabase, QPainter, QSyntaxHighlighter, QTextCharFormat, QTextOption,
+)
 from PySide6.QtWidgets import QPlainTextEdit, QWidget
 
 EDITOR_BG, EDITOR_FG, GUTTER_FG = "#1e1e1e", "#d4d4d4", "#858585"
@@ -154,7 +156,11 @@ class CodeView(QPlainTextEdit):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setReadOnly(True)
-        self.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        # Wrap long lines to the viewport instead of scrolling sideways, so the whole line is readable
+        # without a horizontal scrollbar. A line too long even after word wrapping breaks mid-token.
+        self.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
+        self.setWordWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         font = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
         for family in ("Cascadia Code", "Consolas"):
             if family in QFontDatabase.families():
