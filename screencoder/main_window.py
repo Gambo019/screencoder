@@ -84,6 +84,8 @@ PARAGRAPH_SEP = chr(0x2029)  # QTextCursor.selectedText() uses this for line bre
 CUT_TIMEOUT_MS = 600  # how long Ask waits for the listener to close the sentence being spoken
 MAX_SYNTAX_ROUNDS = 2  # how often unparseable code is automatically sent back to the agent
 MIN_WINDOW_WIDTH = 806  # two thirds of the 1209 px the layout used to need at minimum
+EXPLORER_CHARS = 20  # how long a file name fits in the explorer at its first width
+EXPLORER_CHROME = 60  # px the file tree needs besides the name: indentation, icon, status column, frame
 DEV_TITLE = "🤖 AI developer"  # quick answers and the coding session's replies speak as one developer
 HEADING_LINE = re.compile(r"(?m)^#{1,6}\s")  # a chat reply ends where the agent's report/plan sections begin
 NOTHING_TO_SEND = ("Nothing to send yet - no question in the new speech (filler like \"hmm\" or \"okay\" is skipped) "
@@ -737,13 +739,13 @@ class MainWindow(QMainWindow):
         viewer_layout.addLayout(crumb_row)
         viewer_layout.addWidget(self.code_view, 1)
         viewer_layout.addLayout(file_buttons)
-        explorer.setMinimumWidth(170)
+        explorer.setMinimumWidth(120)
         files_tab = QSplitter(Qt.Orientation.Horizontal)
         files_tab.addWidget(explorer)
         files_tab.addWidget(viewer)
         files_tab.setStretchFactor(0, 0)  # extra width goes to the code, like an IDE
         files_tab.setStretchFactor(1, 1)
-        files_tab.setSizes([270, 690])
+        files_tab.setSizes([self.file_tree.fontMetrics().averageCharWidth() * EXPLORER_CHARS + EXPLORER_CHROME, 840])
 
         self.tabs = QTabWidget()  # names, and whether the Prompts tab is there at all: see _apply_mode
         self.tabs.addTab(plan_tab, "Understanding && plan")
@@ -835,6 +837,7 @@ class MainWindow(QMainWindow):
 
         right = QGroupBox("Ask while it codes")
         self.right_panel = right
+        right.setProperty("remote_map_name", "Quick answers")  # what the remote page's monitor map calls this side
         right_layout = QVBoxLayout(right)
         right_layout.addWidget(self.side_label)
         right_split = QSplitter(Qt.Orientation.Vertical)

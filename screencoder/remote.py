@@ -617,6 +617,8 @@ class Mirror(QObject):
                 corner.toggled.connect(mark)  # flip "Sync tab" -> re-describe so the web learns the new flag
         elif kind == "split":
             w.splitterMoved.connect(mark)
+            if isinstance(self._window, QMainWindow) and w is self._window.centralWidget():
+                w.splitterMoved.connect(lambda *_args: self._mark_ptr(_ptr(self._window)))  # the columns on the map
         elif kind == "tree" and isinstance(w, QTreeView):
             w.expanded.connect(mark)
             w.collapsed.connect(mark)
@@ -854,7 +856,26 @@ class Mirror(QObject):
                     round((least.height() + frame.height() - w.height()) * ratio)],
             "st": "min" if w.isMinimized() else "full" if w.isFullScreen() else "max" if w.isMaximized() else "",
             "n": [round(normal.width() * ratio), round(normal.height() * ratio)],  # its size when it is not maximized
+            "parts": self._columns(w, ratio),
         }
+
+    def _columns(self, w, ratio: float) -> list:
+        """The columns of a window that a splitter divides from left to right, for the map: [distance from the left
+        of its frame, width, name] in physical pixels. A column is called what its `remote_map_name` property says,
+        else after its first tab, else after its title."""
+        split = w.centralWidget() if isinstance(w, QMainWindow) else None
+        if not isinstance(split, QSplitter) or split.orientation() != Qt.Orientation.Horizontal:
+            return []
+        columns, margin = [], w.geometry().x() - w.frameGeometry().x()
+        for i in range(split.count()):
+            pane = split.widget(i)
+            if pane.isHidden():
+                continue
+            tabs, name = pane.findChild(QTabWidget), pane.property("remote_map_name")
+            if not name:
+                name = _plain_label(tabs.tabText(0)) if tabs is not None else pane.title() if isinstance(pane, QGroupBox) else ""
+            columns.append([round((pane.mapTo(w, QPoint(0, 0)).x() + margin) * ratio), round(pane.width() * ratio), name])
+        return columns
 
     def _d_btn(self, node, w, props) -> None:
         props["t"] = _plain_label(w.text())

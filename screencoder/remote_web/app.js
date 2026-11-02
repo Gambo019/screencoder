@@ -1268,10 +1268,11 @@ function placeRoots() {
 
 const mapEl = document.getElementById('map'), mapBtn = document.getElementById('mapbtn');
 const mapInfo = document.getElementById('mapinfo'), mapStage = document.getElementById('mapstage');
-const mapShot = document.getElementById('mapshot'), mapWin = $('div');
+const mapShot = document.getElementById('mapshot'), mapWin = $('div'), mapParts = mapWin.appendChild($('div'));
 const wm = {node: null, geo: null, scale: 1, pad: 0, left: 0, top: 0, drawn: '', drag: null, sending: 0, done: 0,
   monitors: '', shots: null, shotAt: '', asking: 0};
 mapWin.id = 'mapwin';
+mapParts.id = 'mapparts';
 for (const edge of ['n', 'e', 's', 'w', 'ne', 'nw', 'se', 'sw']) {
   const handle = $('div', 'map-h');
   handle.dataset.e = edge;
@@ -1328,11 +1329,21 @@ function drawWin() {
   const g = wm.geo, r = wm.drag ? wm.drag.now : g.r, x = r[0] + r[2] / 2, y = r[1] + r[3] / 2;
   mapSpot(mapWin, r);
   mapWin.classList.toggle('min', g.st === 'min');
+  // The window's columns, as shares of its width: while it is being resized here they follow the rectangle.
+  const parts = g.parts || [];
+  while (mapParts.children.length > parts.length) mapParts.lastElementChild.remove();
+  parts.forEach((p, i) => {
+    const part = mapParts.children[i] || mapParts.appendChild($('div', 'map-part'));
+    part.style.left = p[0] / g.r[2] * 100 + '%';
+    part.style.width = p[1] / g.r[2] * 100 + '%';
+    if (part.textContent !== p[2]) part.textContent = p[2];
+  });
   const away = s => Math.max(s[0] - x, x - s[0] - s[2], 0) + Math.max(s[1] - y, y - s[1] - s[3], 0);
   const on = g.m.reduce((best, s, i) => (away(s) < away(g.m[best]) ? i : best), 0), s = g.m[on];
   const seen = g.m.some(m => r[0] < m[0] + m[2] && r[0] + r[2] > m[0] && r[1] < m[1] + m[3] && r[1] + r[3] > m[1]);
   const state = ({min: ' (minimized)', max: ' (maximized)', full: ' (full screen)'}[g.st] || '') + (seen ? '' : ' (off screen)');
-  mapInfo.textContent = `Monitor ${on + 1}: x ${r[0] - s[0]}, y ${r[1] - s[1]}, ${r[2]} × ${r[3]}${state}`;
+  const divider = parts.length > 1 ? `, divider x ${r[0] - s[0] + Math.round(parts[1][0] / g.r[2] * r[2])}` : '';
+  mapInfo.textContent = `Monitor ${on + 1}: x ${r[0] - s[0]}, y ${r[1] - s[1]}, ${r[2]} × ${r[3]}${divider}${state}`;
 }
 
 // As far as Windows goes: past the edges of the monitors and larger than they are. Only the window's least size holds.

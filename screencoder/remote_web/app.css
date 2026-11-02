@@ -243,6 +243,10 @@ img.k-canvas { display: block; touch-action: none; user-select: none; }
 .map-scr span { position: relative; display: inline-block; padding: 1px 4px; background: #0d1117c0; }
 #mapwin { position: absolute; background: #1f6feb40; border: 1px solid var(--link); cursor: move; touch-action: none; }
 #mapwin.min { background: none; border-style: dashed; }
+#mapparts { position: absolute; inset: 0; pointer-events: none; }
+.map-part { position: absolute; top: 0; bottom: 0; padding: 1px 4px; overflow: hidden; white-space: nowrap;
+  text-overflow: ellipsis; font-size: 10px; color: #fff; text-shadow: 0 0 3px #000, 0 0 1px #000; }
+.map-part + .map-part { border-left: 2px solid #e3b341; }  /* the divider between the app's two sides */
 .map-h { position: absolute; }
 .map-h[data-e="n"], .map-h[data-e="s"] { left: 4px; right: 4px; height: 8px; cursor: ns-resize; }
 .map-h[data-e="e"], .map-h[data-e="w"] { top: 4px; bottom: 4px; width: 8px; cursor: ew-resize; }
