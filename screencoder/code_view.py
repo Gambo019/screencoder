@@ -161,6 +161,10 @@ class CodeView(QPlainTextEdit):
                 font = QFont(family)
                 break
         font.setPointSize(10)
+        # Turn off programming ligatures: a font like Cascadia Code would otherwise draw "!=" as "≠", ">=" as
+        # "≥" and "->" as "→". The text is unchanged (copy/paste gives the real characters), but it has to read
+        # as the exact Python the user will paste back, so show every operator literally.
+        font.setStyleStrategy(QFont.StyleStrategy(font.styleStrategy() | QFont.StyleStrategy.PreferNoShaping))
         self.setFont(font)
         self.setTabStopDistance(4 * self.fontMetrics().horizontalAdvance(" "))
         self.setStyleSheet(
