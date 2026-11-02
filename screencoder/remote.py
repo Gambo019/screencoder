@@ -153,7 +153,7 @@ def _child_widgets(widget) -> list:
     found = []
     for child in widget.children():
         if child.isWidgetType() and not child.isWindow() and not isinstance(child, _SKIP) \
-                and not child.objectName().startswith("qt_"):
+                and not child.objectName().startswith("qt_") and not child.property("remote_skip"):
             found.append(child)
     return found
 
@@ -553,6 +553,9 @@ class Mirror(QObject):
             w.valueChanged.connect(mark)
         elif kind == "tabs":
             w.currentChanged.connect(mark)
+            corner = w.cornerWidget(Qt.Corner.TopRightCorner)
+            if isinstance(corner, QCheckBox):
+                corner.toggled.connect(mark)  # flip "Sync tab" -> re-describe so the web learns the new flag
         elif kind == "split":
             w.splitterMoved.connect(mark)
         elif kind == "tree" and isinstance(w, QTreeView):
@@ -1104,6 +1107,8 @@ class Mirror(QObject):
                          w.tabToolTip(i)])
             pages.append(self._ref(w.widget(i), node))
         props["tabs"], props["cur"], props["ch"] = tabs, w.currentIndex(), pages
+        corner = w.cornerWidget(Qt.Corner.TopRightCorner)  # the desktop's "Sync tab" box, when present
+        props["sync"] = 0 if isinstance(corner, QCheckBox) and not corner.isChecked() else 1
 
     def _d_split(self, node, w, props) -> None:
         horizontal = w.orientation() == Qt.Orientation.Horizontal
@@ -1433,6 +1438,9 @@ class Mirror(QObject):
     def _c_s(self, client, node, w, message) -> None:
         index = int(message[2])
         if isinstance(w, QTabWidget):
+            corner = w.cornerWidget(Qt.Corner.TopRightCorner)
+            if isinstance(corner, QCheckBox) and not corner.isChecked():
+                return  # tab sync is off: the remote browses on its own and must not move the app
             if 0 <= index < w.count() and w.isTabEnabled(index):
                 w.setCurrentIndex(index)
         elif isinstance(w, QComboBox) and 0 <= index < w.count():

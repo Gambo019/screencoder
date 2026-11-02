@@ -535,9 +535,10 @@ function showTab(n, cur) {
     if (t[3]) tab.title = t[3];
     tab.addEventListener('click', () => {
       if (!t[2] || n.el.classList.contains('dis')) return;
-      showTab(n, i);  // shown at once; the app is told and has the last word
+      n.localCur = i;
+      showTab(n, i);  // shown at once; when syncing, the app is told and has the last word
       pin();
-      cmd(['s', n.id, i]);
+      if (p.sync) cmd(['s', n.id, i]);  // only drive the app (and the other viewers) while syncing
     });
     return tab;
   }));
@@ -618,8 +619,10 @@ const KIND = {
         }
         sync(n.stack, want);
       }
-      if (has('tabs') || has('cur') || has('ch')) {
-        showTab(n, p.cur);  // the open tab is synced with the app and every other viewer
+      if (has('tabs') || has('cur') || has('ch') || has('sync')) {
+        if (p.sync) n.localCur = p.cur;  // in sync: follow the app, and snap to it the moment sync is turned on
+        else if (n.localCur == null) n.localCur = p.cur;  // first paint while unsynced: start from the app's tab
+        showTab(n, p.sync ? p.cur : n.localCur);
       }
     },
   },
