@@ -3,7 +3,10 @@
 A desktop app (Python + Qt) that solves coding tasks from **screenshots of your IDE**, whether that's VS Code, JetBrains or a browser-based IDE. It uses the **Claude Code CLI**:
 
 - **Coding agent:** Claude Opus 4.8 at `xhigh` (extra-high) effort reads your screenshots, files and text. It explains its understanding and plan, then writes the code.
-- **Quick answers:** while the agent works, questions heard from your PC's audio are answered within seconds by a separate session (Claude Opus 4.8 at `medium` effort) without interrupting the agent. You can also steer the agent directly.
+- **Quick answers:** while the agent works, questions heard from your PC's audio are answered within seconds without interrupting the agent. You can also steer the agent directly.
+  - During a task, each answer comes from a **copy of the coding session**: it knows everything the agent has seen, read and decided so far, while the agent carries on untouched. The copy runs with the agent's own model, effort, tools and instructions, because that lets it reuse the agent's cache: an answer then costs a few cents, where a copy with its own settings would read the whole conversation again (about 8 times as much). The copy can read files, but the CLI refuses any change it tries.
+  - The agent is told what the panel answered on its behalf, with its next message, so the two stay consistent.
+  - Outside a task, with an API provider, or when the work is done on a copy of your own folder, quick answers run in a session of their own (Claude Opus 4.8 at `medium` effort by default). Working on a copy of your folder, a copy of the session would carry the agent's whole work log, which the quick answers must not see there (see below).
 
 Both models can be changed in **Settings**. Sonnet 4.6 and Haiku 4.5 are lighter options for quick answers.
 
@@ -36,7 +39,15 @@ The window has the question-and-answer panel on the left and the code side on th
      - The global hotkeys **Ctrl+Alt+Shift+S** (region) and **Ctrl+Alt+Shift+F** (the monitor under the mouse) work while your IDE has focus, so you can scroll through a file and capture page after page.
    - **Files:** **📎 Files**, pasting files copied in Explorer, or drag & drop.
 
-   Overlapping or repeated screenshots are fine; the agent merges them using line numbers and tabs. Identical screenshots are skipped automatically. Near-identical ones are flagged with `~#n` so you can remove them.
+   Overlapping or repeated screenshots are fine; the agent merges them using line numbers and tabs. Near-identical ones are flagged with `~#n` so you can remove them.
+
+   The model reads every pixel it is sent, and with many full screenshots that is what makes the first words of the plan slow. So of each message's screenshots only what it has not seen yet is sent; the whole screenshots are still saved, and it can read them from disk when it needs to:
+   - a whole-monitor capture goes without the Windows taskbar;
+   - a screenshot identical to an earlier one is not sent again (a note says so). A re-capture where only the clock changed counts as identical;
+   - a screenshot of the same size as an earlier one is cut down to the rectangle where it differs from the first of them, with a note on where that is - unless that is most of it;
+   - with **New part only** ticked (next to **Screen**, in both places), a screenshot that is the previous one scrolled up or down is cut down to the lines that came into view, plus a few lines for context. Leave it off when something else on screen changes between your screenshots: anything else that changed in the overlap would not be sent.
+
+   Until the plan's first words arrive, its first line shows what the agent is doing and for how long ("is thinking about the problem (12 screenshots) · 45s"), then how long it took.
 
    Pick the **Language** for the solution. Python is the default.
    - **Other** follows the language of the problem.
@@ -68,7 +79,7 @@ The window has the question-and-answer panel on the left and the code side on th
      - Turn it on or off with **🎧 PC audio**.
      - The speech model downloads once on first use: about 70 MB from Hugging Face. The download uses parallel connections and resumes automatically after interruptions.
      - It uses roughly 4% of one CPU core while speech is playing, and nothing when the PC is silent.
-   - **Attachments** (under the transcript): Snip, Screen, Files and Paste add screenshots and files that go with the heard question. Pasted text, such as copied code or an error message, is attached as a small text file.
+   - **Attachments** (under the transcript): Snip, Screen, Files and Paste add screenshots and files that go with the heard question. Pasted text, such as copied code or an error message, is attached as a small text file. **Clear** there removes the transcript as well as the attachments, so the next Ask only sends what is said from then on.
    - **Chat** (bottom of the panel): what was heard and the replies appear as separate chat bubbles, newest at the top.
      - Every reply comes from one **AI developer** speaking in the first person ("I sorted first because…"), whichever button you used.
      - While an answer is being generated and none of it is there yet, its bubble shows a spinner and the line "Next answer is coming. Please check the current codebase while you wait." Both go the moment the first words arrive. This applies to quick answers and to replies from the coding or developer session.
@@ -99,7 +110,7 @@ Every button is enabled only while what it does is possible:
 | **✋ Interrupt & send** | the same, and that session is in the middle of a turn |
 | **■ Stop answer** | a quick answer is being written |
 | **Paste** | the clipboard holds an image, files or text |
-| **Clear** | its box has text or attachments |
+| **Clear** | its box has text or attachments; under the transcript, also when the transcript has speech |
 | **＋ New task** | there is a task or any history to clear |
 | **Workspace** field and **Browse…** | no task has been started yet (the folder is fixed once it runs) |
 | **Open folder** | a task has a workspace, or the typed folder exists |

@@ -473,6 +473,11 @@ class MainWindow(QMainWindow):
         self._side_first = True
         self._side_cost_done = 0.0
         self._questions = 0
+        self._panel_log: deque[tuple[str, str]] = deque(maxlen=6)  # the latest questions and quick answers
+        # The line on top of the plan until its first words (see _show_reading).
+        self._reading_clock: QElapsedTimer | None = None
+        self._reading_line: str | None = None
+        self._reading_shots = 0
         self._run_clock = QElapsedTimer()
         self._run_secs = 0.0
         self.listener: SystemAudioListener | None = None
@@ -783,6 +788,14 @@ class MainWindow(QMainWindow):
         self.ask.capture_requested.connect(lambda mode: self.capture(mode, self.ask))
         self.ask.notice.connect(self._notice)
         self.ask.changed.connect(self._update_buttons)
+        # Clear under the transcript empties it as well: it is what Ask would send.
+        self.ask.more_to_clear = lambda: bool(self._tx or self._tx_partial)
+        self.ask.cleared.connect(self._clear_transcript)
+        self.ask.clear_btn.setToolTip("Remove the transcript and all attachments")
+        # One "New part only" setting, shown next to Screen in both places that take screenshots.
+        for composer in (self.task, self.ask):
+            composer.new_part_box.setChecked(self.settings.new_part_only)
+            composer.new_part_toggled.connect(self._set_new_part)
         self.ask_btn = QPushButton("⚡ Ask")
         self.ask_btn.setObjectName("primary")
         self.ask_btn.clicked.connect(self.ask_side)
@@ -977,6 +990,8 @@ class MainWindow(QMainWindow):
         self._turn_prompts = self._syntax_rounds = self._questions = 0
         self._run_secs = self._side_cost_done = 0.0
         self._tool_names.clear()
+        self._panel_log.clear()
+        self._reading_clock = None
         # The code side: plan, prompts, activity, files
         self.plan_view.wrap_code = False
         self.plan_view.reset()
@@ -1113,6 +1128,7 @@ class MainWindow(QMainWindow):
 
     def _tick(self) -> None:
         self._update_buttons()  # a safety net: whatever changed without telling is picked up within a second
+        self._show_reading()
         secs = self._run_secs + (self._run_clock.elapsed() / 1000 if self._run_clock.isValid() else 0)
         self.elapsed_label.setText(f"⏱ {fmt_secs(secs)}  " if self.run else "")
         main_cost = self.main.total_cost if self.main else 0.0
@@ -1231,7 +1247,7 @@ class MainWindow(QMainWindow):
             inputs.mkdir(parents=True, exist_ok=True)
             QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
             try:
-                imgs, files = atts.prepare(attachments, inputs)
+                imgs, files = atts.prepare(attachments, inputs, new_part_only=self.settings.new_part_only)
             finally:
                 QApplication.restoreOverrideCursor()
             (run_dir / "task.md").write_text(text, encoding="utf-8")
@@ -1342,7 +1358,10 @@ class MainWindow(QMainWindow):
         session.send(atts.content_blocks(imgs, files, body))
         self._set_phase(Phase.ANALYZING)
         self.tabs.setCurrentIndex(0)
-        self.plan_view.append_markdown(f"*{s.coding_model} is reading the problem…*")
+        self._reading_clock, self._reading_line, self._reading_shots = QElapsedTimer(), None, len(imgs)
+        self._reading_clock.start()
+        self._show_reading()
+        self._panel_log.clear()
         self._restart_side()  # fresh quick-answer context for the new task (and pre-warm the CLI)
         self.task_box.hide()  # not needed again for this task; "＋ New task" brings it back
         self._update_buttons()
@@ -1551,6 +1570,39 @@ class MainWindow(QMainWindow):
     def _main_status_changed(self, status: str) -> None:
         self._main_status = "" if status in ("idle", "ready", "starting") else status
         self._refresh_phase_label()
+        self._show_reading()
+
+    def _show_reading(self, final: bool = False) -> None:
+        """The line on top of the plan until its first words: what the agent is doing, and for how long.
+
+        It reads and thinks before it writes, and with many screenshots at a high effort that takes a while;
+        the CLI sends nothing of its thinking to show, so this at least shows that it is working. `final`: its
+        first words are there."""
+        clock = self._reading_clock
+        if clock is None:
+            return
+        if self._reading_line is not None and self.plan_view.live_text() != self._reading_line:
+            self._reading_clock = None  # something else was written below it: it stays as it is
+            return
+        shots = self._reading_shots
+        what = f" ({shots} screenshot{'s' * (shots != 1)})" if shots else ""
+        took = fmt_secs(clock.elapsed() / 1000)
+        model = self.main.model if self.main else self.settings.coding_model
+        if final:
+            line = f"*{model} read the problem{what} in {took}*"
+        elif self.phase != Phase.ANALYZING:
+            line = self._reading_line or ""  # stopped or failed first: left as it was
+        else:
+            status = self._main_status
+            doing = "is thinking about the problem" if status == "thinking" else "is reading the problem"
+            extra = f" · {status}" if status and status not in ("thinking", "writing", "working", "requesting") else ""
+            line = f"*{model} {doing}{what}{extra} · {took}…*"
+        if line != self._reading_line:
+            self.plan_view.set_live(line)
+            self._reading_line = line
+        if final or self.phase != Phase.ANALYZING:
+            self._reading_clock = None
+            self.plan_view.commit_live()
 
     def _main_message_consumed(self, token: str) -> None:
         """The agent picked up a "Send to agent" message: its next piece of text is the reply for the chat."""
@@ -1572,6 +1624,7 @@ class MainWindow(QMainWindow):
         return bubble
 
     def _main_text_started(self) -> None:
+        self._show_reading(final=True)
         if self._directing():
             # His first turn - understanding and questions - is written on the first tab. From then on
             # what he says goes into the chat, in one bubble per turn (see _render_lead).
@@ -2025,6 +2078,7 @@ class MainWindow(QMainWindow):
                             agent=agent if self.run.prompts else "")
 
     def _main_exit(self, code: int, stderr: str) -> None:
+        self._reading_clock = None  # no first words came: the line stays as it last read
         if self._live_view is not None or self._speaking:
             self._main_text_finished()
         self._close_agent_replies("*I couldn't reply - my coding session has ended.*")
@@ -2047,7 +2101,14 @@ class MainWindow(QMainWindow):
         can_run = can_run_commands(self.settings.permission_mode)
         body = prompts.implement_prompt(str(self.run.workspace), can_run, self.run.language,
                                         str(self.run.manifest), feedback)
-        self.main.send([{"type": "text", "text": body}])
+        self.main.send([{"type": "text", "text": body + self._take_answered()}])
+
+    def _take_answered(self) -> str:
+        """What the quick answers said on the coding session's behalf since its last message, for its next one."""
+        if self.run is None or not self.run.answered:
+            return ""
+        answered, self.run.answered = self.run.answered, []
+        return prompts.answered_note(answered)
 
     def _approve(self, feedback: str) -> None:
         if self.phase == Phase.AWAITING:
@@ -2063,7 +2124,7 @@ class MainWindow(QMainWindow):
             return
         self.feedback_edit.clear()
         self.plan_view.append_markdown(f"---\n\n**You:** {feedback}\n\n### Revised plan", spaced=True)
-        self.main.send([{"type": "text", "text": prompts.revise_prompt(feedback)}])
+        self.main.send([{"type": "text", "text": prompts.revise_prompt(feedback) + self._take_answered()}])
         self._set_phase(Phase.ANALYZING)
         self.tabs.setCurrentIndex(0)
 
@@ -2100,7 +2161,8 @@ class MainWindow(QMainWindow):
         self.run.messages += 1
         try:
             # Saved under the inputs folder: both sessions are allowed to read files there.
-            imgs, files = atts.prepare(attachments, self.run.inputs / "messages" / f"m{self.run.messages:02d}", "Image")
+            imgs, files = atts.prepare(attachments, self.run.inputs / "messages" / f"m{self.run.messages:02d}", "Image",
+                                       new_part_only=self.settings.new_part_only)
         except OSError as exc:
             QMessageBox.critical(self, APP_NAME, f"Could not save the attachments:\n{exc}")
             return
@@ -2186,7 +2248,7 @@ class MainWindow(QMainWindow):
         # answers until the user has brought it over, so he must not speak of it as done.
         unseen = self._project_state()[0]
         body = (prompts.revise_prompt(message + extra, chat_reply_first=True, said=said) if planning
-                else prompts.steer_prompt(message, said, unseen) + extra)
+                else prompts.steer_prompt(message, said, unseen) + extra) + self._take_answered()
         if interrupt_first and self.main.busy:
             self.main.interrupt()
         shown = heard or "(see attachments)"
@@ -2229,17 +2291,42 @@ class MainWindow(QMainWindow):
         self._retire_side()
         self._ensure_side()
 
+    def _copy_source(self) -> ClaudeSession | None:
+        """The coding session a quick answer is made a copy of, so that it knows everything the agent knows.
+
+        Only with Claude Code on both sides and while that session runs. Not when the work is done in a copy
+        of the user's own folder: a copy of the session carries its whole work log, and there the quick answers
+        must not hear about the developer's copy or work that is not in the user's folder yet (_side_body)."""
+        main = self.main
+        if (self.run is None or self.run.given is not None or not isinstance(main, ClaudeSession)
+                or not main.session_id or not main.running or self.settings.side_provider != llm.CLAUDE_CODE):
+            return None
+        return main
+
+    def _side_system(self) -> str:
+        """The quick-answer instructions: the system prompt of its own session, or a copy's first question."""
+        system = (prompts.LEAD_SIDE_SYSTEM if self._directing() else
+                  prompts.SIDE_SYSTEM_GIVEN if self.run and self.run.given else prompts.SIDE_SYSTEM)
+        return system + prompts.name_note(self.settings.dev_name)
+
     def _ensure_side(self):
         s = self.settings
         provider = s.side_provider
-        if (self.side is not None and self.side.running and self.side.model == s.side_model
-                and getattr(self.side, "provider", llm.CLAUDE_CODE) == provider):
-            return self.side
+        source, side = self._copy_source(), self.side
+        if source is not None:
+            # A copy stays in use while the agent has not moved on since it was made, and while it is answering
+            # (the next question waits its turn there); otherwise a fresh copy is made.
+            if (side is not None and side.running and getattr(side, "fork", False)
+                    and side.resume == source.session_id and (side.busy or side.copied_at == source.entries)):
+                return side
+        elif (side is not None and side.running and not getattr(side, "fork", False) and side.model == s.side_model
+              and getattr(side, "provider", llm.CLAUDE_CODE) == provider):
+            return side
         self._retire_side()
         claude = resolve_claude_cli(s)
-        if provider == llm.CLAUDE_CODE and not claude:
+        if source is None and provider == llm.CLAUDE_CODE and not claude:
             return None
-        if provider != llm.CLAUDE_CODE and not llm.ready(s, provider)[0]:
+        if source is None and provider != llm.CLAUDE_CODE and not llm.ready(s, provider)[0]:
             return None  # the chosen API has no key; ask_side falls back to telling the user
         if self.run:
             # With a folder given by the user, questions are answered from that folder - it is what the person
@@ -2249,11 +2336,28 @@ class MainWindow(QMainWindow):
             cwd, add_dirs = (Path(s.runs_dir).expanduser() / "scratch"), []
             cwd.mkdir(parents=True, exist_ok=True)
             cwd = cwd.resolve()
-        system = (prompts.LEAD_SIDE_SYSTEM if self._directing() else
-                  prompts.SIDE_SYSTEM_GIVEN if self.run and self.run.given else prompts.SIDE_SYSTEM)
-        system += prompts.name_note(s.dev_name)
         log_path = self.run.dir / "quick_answers.jsonl" if self.run else None
-        if provider == llm.CLAUDE_CODE:
+        if source is not None:
+            # A copy of the coding session as it is right now: it knows everything the agent has seen and done.
+            # Same model, effort, tools, instructions and folder as the agent, which lets it reuse the agent's
+            # cache instead of reading the whole conversation again. The default permission mode makes the CLI
+            # refuse any change it tries; its quick-answer role comes with each first question (_side_body).
+            side = ClaudeSession(
+                claude_path=source.claude_path,
+                cwd=source.cwd,
+                model=source.model,
+                effort=source.effort,
+                tools=source.tools,
+                add_dirs=source.add_dirs,
+                append_system_prompt=source.append_system_prompt,
+                log_path=log_path,
+                persist=False,
+                resume=source.session_id,
+                fork=True,
+                parent=self,
+            )
+            side.copied_at = source.entries
+        elif provider == llm.CLAUDE_CODE:
             side = ClaudeSession(
                 claude_path=claude,
                 cwd=cwd,
@@ -2261,7 +2365,7 @@ class MainWindow(QMainWindow):
                 effort=s.side_effort if supports_effort(s.side_model) else None,
                 tools="Read,Glob,Grep",
                 add_dirs=add_dirs,
-                append_system_prompt=system,
+                append_system_prompt=self._side_system(),
                 log_path=log_path,  # what it was sent and said
                 persist=False,
                 parent=self,
@@ -2274,7 +2378,7 @@ class MainWindow(QMainWindow):
                 model=s.side_model,
                 tools="Read,Glob,Grep",  # read-only: the quick answer can look at the workspace, not change it
                 add_dirs=add_dirs,
-                append_system_prompt=system,
+                append_system_prompt=self._side_system(),
                 log_path=log_path,
                 parent=self,
             )
@@ -2348,7 +2452,8 @@ class MainWindow(QMainWindow):
         self._questions += 1
         base = self.run.inputs if self.run else HOME_DIR / "scratch"  # inputs: readable by both sessions
         try:
-            imgs, files = atts.prepare(attachments, base / "questions" / f"q{self._questions:02d}", "Image")
+            imgs, files = atts.prepare(attachments, base / "questions" / f"q{self._questions:02d}", "Image",
+                                       new_part_only=self.settings.new_part_only)
         except OSError as exc:
             QMessageBox.critical(self, APP_NAME, f"Could not save the attachments:\n{exc}")
             return
@@ -2366,7 +2471,7 @@ class MainWindow(QMainWindow):
         answer.forward = (heard, imgs, files)  # what to hand to the coding session if this is a work request
         answer.set_status("thinking…")
         answer.set_waiting(True)  # a spinner and "next answer is coming" until the first words are there
-        answer.setToolTip(f"Quick answer ({self.settings.side_model})")
+        answer.setToolTip(f"Quick answer ({side.model}{', from a copy of the coding session' if getattr(side, 'fork', False) else ''})")
         self._answers.append(answer)
         side.send(atts.content_blocks(imgs, files, body))
         self.stop_answer_btn.setEnabled(True)
@@ -2378,6 +2483,10 @@ class MainWindow(QMainWindow):
         # A request may be handed on to the coding session - only possible while one is alive.
         can_forward = bool(self.main and self.main.running and run)
         att_desc = atts.describe_inputs(imgs, files) if (imgs or files) else ""
+        # A copy of the coding session knows the task and the work already: it is only told its role here.
+        copy = run is not None and getattr(self.side, "fork", False)
+        briefing = self._side_system() if copy else ""
+        earlier = "\n\n".join(f"Q: {q}\nA: {a}" for q, a in self._panel_log) if copy else ""
         if run is not None and run.directing:
             fresh = run.activity[run.side_seen:]
             run.side_seen = len(run.activity)
@@ -2389,7 +2498,7 @@ class MainWindow(QMainWindow):
                 first=self._side_first, task=run.task, inputs=run.inputs_md, workspace=str(run.workspace),
                 shared=run.shared, working=self.phase in ACTIVE, prompt_open=run.prompt_open,
                 run_open=run.run_open, log=log, heard=heard, heard_context=heard_context,
-                can_forward=can_forward,
+                can_forward=can_forward, briefing=briefing, earlier=earlier,
             )
         if run is not None:
             # Working on a copy of the user's folder: which of his changes the person asking can see. While
@@ -2413,7 +2522,7 @@ class MainWindow(QMainWindow):
                 pending=pending, landed=landed, doing=self._changes_in_progress() if pending else "",
                 phase=self.phase.value, plan=plan if (plan or not self._side_first) else "(still being written)",
                 activity=activity, touched=run.touched, heard=heard, heard_context=heard_context,
-                can_forward=can_forward,
+                can_forward=can_forward, briefing=briefing, earlier=earlier,
             )
         return prompts.side_prompt(
             question=question, attachments=att_desc,
@@ -2450,7 +2559,8 @@ class MainWindow(QMainWindow):
         self._questions += 1
         base = self.run.inputs if self.run else HOME_DIR / "scratch"
         try:
-            imgs, files = atts.prepare(attachments, base / "questions" / f"q{self._questions:02d}", "Image")
+            imgs, files = atts.prepare(attachments, base / "questions" / f"q{self._questions:02d}", "Image",
+                                       new_part_only=self.settings.new_part_only)
         except OSError as exc:
             QMessageBox.critical(self, APP_NAME, f"Could not save the attachments:\n{exc}")
             return
@@ -2463,7 +2573,7 @@ class MainWindow(QMainWindow):
         answer.forward = (text, imgs, files)  # a work request is handed to the coding session like any other
         answer.set_status("thinking…")
         answer.set_waiting(True)
-        answer.setToolTip(f"Quick answer ({self.settings.side_model})")
+        answer.setToolTip(f"Quick answer ({side.model}{', from a copy of the coding session' if getattr(side, 'fork', False) else ''})")
         self._answers.append(answer)
         side.send(atts.content_blocks(imgs, files, body))
         self.stop_answer_btn.setEnabled(True)
@@ -2568,10 +2678,13 @@ class MainWindow(QMainWindow):
                     bubble.set_markdown(f"{bubble.raw}\n\n❌ {ev.get('result') or ev.get('subtype')}")
                 elif not bubble.raw.strip():
                     bubble.set_markdown("*(stopped)*" if failed else "*(no answer)*")
-                elif not failed and self._directing() and getattr(bubble, "forward", ("",))[0]:
-                    # The developer's working session is told what was answered on his behalf, with his
-                    # next message, so that he does not contradict it later.
-                    self.run.answered.append((bubble.forward[0], bubble.raw.strip()))
+                elif not failed:
+                    asked = getattr(bubble, "forward", ("",))[0] or (bubble.question.markdown() if bubble.question else "")
+                    self._panel_log.append((asked, bubble.raw.strip()))
+                    if self.run is not None and asked:
+                        # The working session is told what was answered on its behalf, with its next message,
+                        # so that it does not contradict it later.
+                        self.run.answered.append((asked, bubble.raw.strip()))
         if self.side is None or not self.side.busy:
             # Questions asked while an answer was running were folded into that answer by the CLI.
             while self._answers:
@@ -2678,6 +2791,21 @@ class MainWindow(QMainWindow):
         if cut:
             self._finish_pending()
 
+    def _clear_transcript(self) -> None:
+        """What was heard so far is gone: the next Ask sends only what is said from now on."""
+        self._tx.clear()
+        self._tx_partial = ""
+        self._schedule_transcript()
+
+    def _set_new_part(self, on: bool) -> None:
+        self.settings.new_part_only = on
+        self.settings.save()
+        for composer in (self.task, self.ask):
+            if composer.new_part_box.isChecked() != on:
+                composer.new_part_box.blockSignals(True)
+                composer.new_part_box.setChecked(on)
+                composer.new_part_box.blockSignals(False)
+
     def _transcript_context(self) -> str:
         return "\n".join(text for text, asked in self._tx if asked)[-HEARD_CONTEXT_CHARS:]
 
@@ -2701,6 +2829,7 @@ class MainWindow(QMainWindow):
 
     def _render_transcript(self) -> None:
         self._update_buttons()  # new speech is something to send; speech already sent is not
+        self.ask.refresh_buttons()  # and the transcript is something Clear can remove
         if self.tx_view.textCursor().hasSelection():
             self._tx_timer.start(300)  # don't wipe the user's selection; refresh once it is gone
             return

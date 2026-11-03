@@ -52,6 +52,8 @@ class PreparedImage:
     path: Path
     media_type: str
     data_b64: str | None  # None when it did not fit the inline budget (the model reads it from disk)
+    note: str = ""  # what of it is sent, when that is not all of it (see images.plan_shots)
+    same_as: str = ""  # label of an earlier screenshot it is identical to: it is not sent again
 
 
 @dataclass
@@ -84,24 +86,48 @@ def _unique(dest: Path) -> Path:
     raise AssertionError("unreachable")
 
 
-def prepare(atts: list[Attachment], dest: Path, label: str = "Screenshot") -> tuple[list[PreparedImage], list[PreparedFile]]:
-    """Save attachments under `dest` and encode images for the API (within the inline budget)."""
+def _sent_part(plan: images.ShotPlan, names: list[str]) -> str:
+    """The note that goes with a screenshot of which only a part is sent."""
+    x, y, w, h = plan.rect
+    if plan.kind == "part":
+        return (f"only the part that differs from {names[plan.ref]}: x {x}-{x + w}, y {y}-{y + h} of the same "
+                f"screen. Everything outside it is exactly as in {names[plan.ref]}.")
+    if plan.kind == "new":
+        way = "down" if plan.shift > 0 else "up"
+        return (f"{names[plan.ref]} scrolled {way} by {abs(plan.shift)} pixels; only the lines that came into view "
+                f"are shown (x {x}-{x + w}, y {y}-{y + h}, with a few lines already seen for context).")
+    return ""
+
+
+def prepare(atts: list[Attachment], dest: Path, label: str = "Screenshot",
+            new_part_only: bool = False) -> tuple[list[PreparedImage], list[PreparedFile]]:
+    """Save attachments under `dest` and encode images for the API (within the inline budget).
+
+    Of each screenshot only what the model has not seen yet in this message is sent (images.plan_shots;
+    `new_part_only` adds cutting a scrolled view down to its new lines). The whole screenshot is still saved,
+    so the model can read it from disk when the part is not enough."""
     shots = [a for a in atts if a.kind == "image" and a.image is not None]
     max_edge = images.MAX_LONG_EDGE if len(shots) <= 20 else images.MAX_LONG_EDGE_MANY
     budget = INLINE_IMAGE_BUDGET
     prepared_images: list[PreparedImage] = []
     if shots:
         (dest / "screenshots").mkdir(parents=True, exist_ok=True)
-    for i, att in enumerate(shots, 1):
-        data, media_type = images.encode_for_api(att.image, max_edge)
+    plans = images.plan_shots([a.image for a in shots], new_part_only)
+    names = [f"{label} {i}" + (f" ({att.name})" if att.path else "") for i, att in enumerate(shots, 1)]
+    for i, (att, plan) in enumerate(zip(shots, plans), 1):
+        name = names[i - 1]
+        whole, media_type = images.encode_for_api(images.without_taskbar(att.image), max_edge)
         path = dest / "screenshots" / f"{i:02d}{'.png' if media_type == 'image/png' else '.jpg'}"
-        path.write_bytes(data)
+        path.write_bytes(whole)
+        if plan.kind == "same":
+            prepared_images.append(PreparedImage(name, path, media_type, None, same_as=names[plan.ref]))
+            continue
+        data, kind = (whole, media_type) if plan.kind == "whole" else images.encode_for_api(plan.image, max_edge)
         b64 = base64.b64encode(data).decode("ascii")
         inline = len(b64) <= budget
         if inline:
             budget -= len(b64)
-        name = f"{label} {i}" + (f" ({att.name})" if att.path else "")
-        prepared_images.append(PreparedImage(name, path, media_type, b64 if inline else None))
+        prepared_images.append(PreparedImage(name, path, kind, b64 if inline else None, note=_sent_part(plan, names)))
 
     prepared_files: list[PreparedFile] = []
     others = [a for a in atts if a.kind == "file"]
@@ -128,9 +154,14 @@ def content_blocks(imgs: list[PreparedImage], files: list[PreparedFile], text: s
     """Labelled images first, then inlined files, then the instructions (best order for vision prompts)."""
     blocks: list[dict] = []
     for img in imgs:
+        if img.same_as:
+            blocks.append({"type": "text", "text": f"{img.label}: exactly the same as {img.same_as}, so it is not "
+                                                   f"repeated (saved at {img.path})"})
+            continue
         if img.data_b64 is None:
             continue
-        blocks.append({"type": "text", "text": f"{img.label} - saved at {img.path}"})
+        sent = f" - {img.note} The whole screenshot is saved at {img.path}" if img.note else f" - saved at {img.path}"
+        blocks.append({"type": "text", "text": img.label + sent})
         blocks.append({"type": "image", "source": {"type": "base64", "media_type": img.media_type, "data": img.data_b64}})
     for f in files:
         if f.text is None:
@@ -146,7 +177,12 @@ def describe_inputs(imgs: list[PreparedImage], files: list[PreparedFile]) -> str
     """Markdown list of what was attached and where it is saved (for the prompt text)."""
     lines = []
     for img in imgs:
-        where = "attached above" if img.data_b64 else "NOT attached inline (size limit) - Read it from disk"
+        if img.same_as:
+            where = f"identical to {img.same_as}, not repeated"
+        elif not img.data_b64:
+            where = "NOT attached inline (size limit) - Read it from disk"
+        else:
+            where = "attached above" + (" (only part of it, see the note there)" if img.note else "")
         lines.append(f"- {img.label}: {where}; saved at `{img.path}`")
     for f in files:
         how = "content attached above" if f.text is not None else "binary or large - Read it from disk"

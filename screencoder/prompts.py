@@ -202,6 +202,35 @@ _SIDE_REST = (
 SIDE_SYSTEM = side_system()
 SIDE_SYSTEM_GIVEN = side_system(given=True)
 
+# A quick answer can be given by a copy of the coding session itself, which knows everything the session has
+# seen and done. Its system prompt has to stay the coding session's (that is what lets it reuse that session's
+# cache), so its quick-answer instructions come with its first question instead.
+COPY_NOTE = (
+    "[A quick question for you, outside your task]\n"
+    "This is a separate copy of your session, made so that you can answer a question with everything you know "
+    "so far. Your task goes on in your own session; here you only answer. Do not carry on with the task or "
+    "start any work, and do not change any file: changes are refused here. You may read files to check "
+    "something.\n\nFrom here on, this is your role: "
+)
+
+
+def _copy_parts(briefing: str, earlier: str) -> list[str]:
+    """The first message to a copy of the coding session: its role here, and what it answered before."""
+    parts = [COPY_NOTE + briefing]
+    if earlier:
+        parts.append("## What you answered in the quick-answer panel a moment ago (stay consistent with it)\n"
+                     + earlier)
+    return parts
+
+
+def answered_note(answered: list[tuple[str, str]]) -> str:
+    """For the coding session's next message: what the quick answers said on its behalf meanwhile."""
+    if not answered:
+        return ""
+    pairs = "\n\n".join(f"Q: {q}\nA: {a[:800]}" for q, a in answered[-8:])
+    return ("\n\n[Meanwhile you were asked these in the quick-answer panel, and this is what you answered - "
+            f"stay consistent with it]\n{pairs}")
+
 # The coding session stays in its own folder. With a project folder given by the user that folder is a copy,
 # and the original is the user's to change.
 STAY_INSIDE = (
@@ -699,24 +728,32 @@ def lead_side_prompt(
     heard: str = "",
     heard_context: str = "",
     can_forward: bool = False,
+    briefing: str = "",
+    earlier: str = "",
 ) -> str:
     """Quick answer to the person assessing the developer while he directs an external coding agent.
 
     `working`: his working session is busy with a turn right now (otherwise it waits for input).
     `prompt_open` / `run_open`: his last turn ended with a prompt for the agent / with something to run or
     edit by hand, and nothing has come back for it yet.
+    `briefing`: the quick-answer instructions, when this goes to a copy of his working session (see COPY_NOTE),
+    which knows the task and everything so far already; `earlier` is what the panel answered before.
     """
     parts: list[str] = []
-    if first:
-        parts.append("# The task you were given, which you are solving by directing a coding agent\n"
-                     f"{task or '(described in the screenshots)'}")
-        where = (f"The agent's workspace, which you can read: `{workspace}`" if shared else
-                 "You have no access to the folder the agent works in: you know its work from the log below.")
-        parts.append(f"## Inputs\n{inputs}\n\n{where}")
-    heading = "## What has happened so far" if first else "## What has happened since the previous question"
-    parts.append(f"{heading}\n(YOU SAID marks your own words, including the prompts you gave the agent. SAID TO "
-                 "YOU is the person you are talking to. STATUS lines are facts that reached you - results of "
-                 f"what you ran, what the agent did - not things anyone said.)\n\n{log or '(nothing new yet)'}")
+    if briefing:
+        if first:
+            parts += _copy_parts(briefing, earlier)
+    else:
+        if first:
+            parts.append("# The task you were given, which you are solving by directing a coding agent\n"
+                         f"{task or '(described in the screenshots)'}")
+            where = (f"The agent's workspace, which you can read: `{workspace}`" if shared else
+                     "You have no access to the folder the agent works in: you know its work from the log below.")
+            parts.append(f"## Inputs\n{inputs}\n\n{where}")
+        heading = "## What has happened so far" if first else "## What has happened since the previous question"
+        parts.append(f"{heading}\n(YOU SAID marks your own words, including the prompts you gave the agent. SAID "
+                     "TO YOU is the person you are talking to. STATUS lines are facts that reached you - results "
+                     f"of what you ran, what the agent did - not things anyone said.)\n\n{log or '(nothing new yet)'}")
     pending = ["a prompt for the agent"] * prompt_open + ["something to run or edit by hand"] * run_open
     if working:
         state = "you are working out your next step."
@@ -835,14 +872,24 @@ def side_prompt(
     pending: list[str] | None = None,
     landed: list[str] | None = None,
     doing: str = "",
+    briefing: str = "",
+    earlier: str = "",
 ) -> str:
     """`given`: `workspace` is the user's own project folder - what the person asking sees - while the coding
     itself happens in a copy the quick model is told nothing about (SIDE_WHERE_GIVEN). `pending` / `landed`
     then name the developer's changes that are not / are in that folder at this moment, and `doing` holds the
-    pending ones themselves. While anything is pending, the work log is left out: it reads as finished work."""
+    pending ones themselves. While anything is pending, the work log is left out: it reads as finished work.
+
+    `briefing`: the quick-answer instructions, when this goes to a copy of the coding session (see COPY_NOTE).
+    The copy knows the task, the plan and the work already, so only where things stand is said; `earlier` is
+    what the panel answered before. Never with `given`: a copy carries the whole work log."""
     # Everything is phrased as the developer's own task, plan and work log (see SIDE_SYSTEM): one persona.
     parts: list[str] = []
-    if task is None:
+    if briefing:
+        if first:
+            parts += _copy_parts(briefing, earlier)
+        parts.append(f"Where you are right now: {phase}.")
+    elif task is None:
         if first:
             parts.append("# Context\nYou have not been given a coding task yet. Answer from the question and its attachments.")
     else:

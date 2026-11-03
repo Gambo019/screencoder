@@ -56,6 +56,9 @@ class Settings:
     reading_scale: float = 1.5
     main_split: list = field(default_factory=lambda: [600, 900])  # widths of the Q&A panel and the code side
     show_thinking: bool = True
+    # Screenshots that scroll through the same view are sent as only the lines each one adds (the "New part
+    # only" box next to Screen). Off by default: anything else that changed in the overlap is not sent.
+    new_part_only: bool = False
     hotkeys_enabled: bool = True
     stealth: bool = False  # hide the window from screen capture, taskbar and Alt+Tab (visible to the user)
     always_on_top: bool = False  # keep the window above all other apps

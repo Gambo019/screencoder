@@ -40,6 +40,9 @@ class ClaudeSession(QObject):
     (or starts a new turn if the current one is already answering). The CLI echoes each message
     when it consumes it (--replay-user-messages), which is how `busy` knows whether more work is
     pending after a "result". interrupt() ends the current turn but keeps the session alive.
+
+    With `resume` and `fork` it starts as a copy of that (saved) session: everything said and done in it so far,
+    under a new id of its own, so the original goes on untouched.
     """
 
     initialized = Signal(dict)
@@ -69,6 +72,8 @@ class ClaudeSession(QObject):
         name: str | None = None,
         persist: bool = True,
         log_path: Path | None = None,
+        resume: str | None = None,
+        fork: bool = False,
         parent: QObject | None = None,
     ):
         super().__init__(parent)
@@ -83,8 +88,11 @@ class ClaudeSession(QObject):
         self.name = name
         self.persist = persist
         self.log_path = log_path
+        self.resume = resume
+        self.fork = fork
         self.session_id = ""
         self.total_cost = 0.0
+        self.entries = 0  # messages and tool results in the conversation so far: grows whenever it moves on
         self._pending: deque[str] = deque()  # fingerprints of sent messages not yet consumed
         self._turn_active = False
         self._stopping = False
@@ -122,6 +130,10 @@ class ClaudeSession(QObject):
             args += ["--name", self.name]
         if not self.persist:
             args += ["--no-session-persistence"]
+        if self.resume:
+            args += ["--resume", self.resume]
+        if self.fork:
+            args += ["--fork-session"]
         for directory in self.add_dirs:
             args += ["--add-dir", str(directory)]
         return args
@@ -222,10 +234,12 @@ class ClaudeSession(QObject):
             if not sub:
                 self._handle_stream(ev.get("event") or {})
         elif kind == "assistant":
+            self.entries += 1
             for block in (ev.get("message") or {}).get("content") or []:
                 if block.get("type") == "tool_use":
                     self.tool_used.emit(block, sub)
         elif kind == "user":
+            self.entries += 1
             content = (ev.get("message") or {}).get("content")
             results = [b for b in content or [] if isinstance(b, dict) and b.get("type") == "tool_result"] \
                 if isinstance(content, list) else []
@@ -238,6 +252,8 @@ class ClaudeSession(QObject):
                     self._turn_active = True
                     self.message_consumed.emit(fingerprint)
         elif kind == "result":
+            if not self._turn_active and not ev.get("num_turns") and not ev.get("is_error"):
+                return  # a copy first winds up a notice left in the session it copied: not an answer of ours
             self._turn_active = False
             self.total_cost = float(ev.get("total_cost_usd") or self.total_cost)
             self.status_changed.emit("idle")

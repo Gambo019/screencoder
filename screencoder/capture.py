@@ -5,6 +5,8 @@ from PySide6.QtCore import QObject, QPoint, QRect, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QCursor, QGuiApplication, QImage, QPainter, QPen, QPixmap, QRegion
 from PySide6.QtWidgets import QApplication, QWidget
 
+from . import images
+
 HINT = "Drag to select an area  -  Enter: whole screen  -  Esc / right-click: cancel"
 
 
@@ -135,6 +137,11 @@ class ScreenCapturer(QObject):
                 screen = QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
             img = screen.grabWindow(0).toImage()
             img.setDevicePixelRatio(1.0)
+            # Where the monitor is not covered by the taskbar, in the picture's pixels: it is left out when sent.
+            whole, free = screen.geometry(), screen.availableGeometry()
+            ratio = img.width() / max(1, whole.width())
+            img.setText(images.FREE_AREA_KEY, ",".join(str(round(v * ratio)) for v in (
+                free.x() - whole.x(), free.y() - whole.y(), free.width(), free.height())))
             self._done(img)
             return
         under_mouse = QGuiApplication.screenAt(QCursor.pos())

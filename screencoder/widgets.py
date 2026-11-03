@@ -11,8 +11,8 @@ from PySide6.QtGui import (
     QTextCharFormat, QTextCursor, QTextFormat,
 )
 from PySide6.QtWidgets import (
-    QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QLayout, QPlainTextEdit, QPushButton, QScrollArea,
-    QSizePolicy, QTextBrowser, QToolButton, QVBoxLayout, QWidget,
+    QCheckBox, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QLayout, QPlainTextEdit, QPushButton,
+    QScrollArea, QSizePolicy, QTextBrowser, QToolButton, QVBoxLayout, QWidget,
 )
 
 from . import images
@@ -233,6 +233,8 @@ class Composer(QWidget):
     capture_requested = Signal(str)  # "region" | "full"
     notice = Signal(str)
     changed = Signal()  # the text or the attachments changed (what can be sent is different now)
+    cleared = Signal()  # the Clear button was pressed (not take(), which also empties it)
+    new_part_toggled = Signal(bool)  # the "New part only" box next to Screen
 
     def __init__(self, title: str, placeholder: str, min_text_height: int = 70, text_input: bool = True,
                  submit_on_enter: bool = False, parent=None):
@@ -242,6 +244,7 @@ class Composer(QWidget):
         self._atts: list[Attachment] = []
         self._shot_counter = 0
         self._snippet_counter = 0
+        self.more_to_clear = lambda: False  # something outside it that Clear empties too (see `cleared`)
         self.setAcceptDrops(True)
 
         self.edit = PasteTextEdit()
@@ -282,7 +285,8 @@ class Composer(QWidget):
             ("📋 Paste", "Paste an image, files or text from the clipboard (Ctrl+V)" if text_input else
              "Paste an image or files from the clipboard (Ctrl+V); copied text is attached as a text file",
              self.paste_from_clipboard),
-            ("Clear", "Remove the text and all attachments" if text_input else "Remove all attachments", self.clear),
+            ("Clear", "Remove the text and all attachments" if text_input else "Remove all attachments",
+             self._clear_pressed),
         ):
             btn = QPushButton(text)
             btn.setToolTip(tip)
@@ -291,8 +295,16 @@ class Composer(QWidget):
             self.buttons.addWidget(btn)
             if slot == self.paste_from_clipboard:
                 self.paste_btn = btn  # enabled only while the clipboard holds something that can be pasted
-            elif slot == self.clear:
+            elif slot == self._clear_pressed:
                 self.clear_btn = btn  # enabled only while there is something to remove
+            elif text == "🖥 Screen":
+                self.new_part_box = QCheckBox("New part only")
+                self.new_part_box.setToolTip(
+                    "When screenshots scroll through the same view, send only the lines each one adds - the model "
+                    "then has less to read. The whole screenshots are still saved for it.\nTurn this off if "
+                    "something else on screen changed between them too: that would not be sent.")
+                self.new_part_box.toggled.connect(self.new_part_toggled)
+                self.buttons.addWidget(self.new_part_box)
         self.count_label = QLabel()
         self.count_label.setStyleSheet("color:#9aa4b2;")
         self.buttons.addWidget(self.count_label)
@@ -321,7 +333,16 @@ class Composer(QWidget):
 
     def _refresh_buttons(self) -> None:
         self.paste_btn.setEnabled(self._clipboard_usable())
-        self.clear_btn.setEnabled(not self.is_empty())
+        self.clear_btn.setEnabled(not self.is_empty() or self.more_to_clear())
+
+    def refresh_buttons(self) -> None:
+        """Call when what `more_to_clear` reports may have changed."""
+        self._refresh_buttons()
+
+    def _clear_pressed(self) -> None:
+        self.clear()
+        self.cleared.emit()
+        self._refresh_buttons()
 
     def _content_changed(self) -> None:
         self._refresh_buttons()
@@ -552,6 +573,18 @@ class LiveMarkdownView(QTextBrowser):
         if self._live is None:
             self.begin_live()
         self._live += text
+        if not self._timer.isActive():
+            self._timer.start()
+
+    def live_text(self) -> str | None:
+        """The live entry's text, or None when there is none."""
+        return self._live
+
+    def set_live(self, text: str) -> None:
+        """Replace the live entry's whole text (a status line that keeps changing)."""
+        if self._live is None:
+            self.begin_live()
+        self._live = text
         if not self._timer.isActive():
             self._timer.start()
 
