@@ -127,6 +127,9 @@ STANDBY_MAX_AGE_MS = 10_000
 WARM_EVERY_MS = 50 * 60_000  # the CLI caches for an hour: the quick-answer cache is warmed at most this often
 EFFORT_RE = re.compile(r"effort\s*[:=]?\s*\**\s*(low|medium|high|xhigh|max)\b", re.I)
 KIND_RE = re.compile(r"kind\s*[:=]?\s*\**\s*(code|answer)\b", re.I)  # prompts.KIND_SCALE
+# Code Review: the line on which he notes which findings a fix dealt with (prompts.FIXED_RULE) - read, never shown.
+FIXED_RE = re.compile(r"`?\[fixed:\s*([\d,\s]*)\]`?", re.I)
+FIXED_TAIL = re.compile(r"\s*`?\[(f(i(x(e(d(:[^\]]*)?)?)?)?)?)?\]?`?\s*$", re.I)  # that line, also still coming in
 MIN_WINDOW_WIDTH = 806  # two thirds of the 1209 px the layout used to need at minimum
 EXPLORER_CHARS = 20  # how long a file name fits in the explorer at its first width
 EXPLORER_CHROME = 60  # px the file tree needs besides the name: indentation, icon, status column, frame
@@ -198,6 +201,7 @@ class Run:
     effort: str = "high"  # how hard solving it is, as the agent judged when it took the task in (warm-up)
     kind: str = "code"  # DSA: "code" - or "answer" when it wants an answer and no code (prompts.KIND_SCALE)
     findings: list[str] = field(default_factory=list)  # Code Review: the numbered findings of the latest review
+    fixed: set[int] = field(default_factory=set)  # ...and the numbers of those he has fixed since (FIXED_RE)
     activity: list[str] = field(default_factory=list)  # plain log handed to the quick-answer model
     touched: list[str] = field(default_factory=list)  # files the agent wrote or edited
     side_seen: int = 0
@@ -571,6 +575,7 @@ class MainWindow(QMainWindow):
         self._jobs_cost_done = 0.0
         self._plan_reply = ""  # with an API session (no copies): which of those the session itself is writing
         self._token_phase: dict[str, Phase] = {}  # message token -> the phase it starts once picked up
+        self._work_text = ""  # all the agent wrote in the current turn of work (Code Review: what it fixed)
         self._latest_ask = ""  # the latest question or request from the chat (for "How I'd do it")
         # The line on top of the plan until its first words (see _show_reading).
         self._reading_clock: QElapsedTimer | None = None
@@ -1292,7 +1297,7 @@ class MainWindow(QMainWindow):
         self.solve_btn.setEnabled(free and self.phase == Phase.READY)
         self.tests_btn.setEnabled(free)
         self.review_btn.setEnabled(free and self.phase == Phase.LISTENING)
-        self.fix_btn.setEnabled(free and self.phase == Phase.LISTENING and bool(run and run.findings))
+        self.fix_btn.setEnabled(free and self.phase == Phase.LISTENING and bool(self._open_findings()))
         # The question panel
         self.ask_btn.setEnabled(to_send)
         self.send_btn.setEnabled(alive and to_send)
@@ -1906,6 +1911,8 @@ class MainWindow(QMainWindow):
         if self.phase == Phase.WARMING:
             self._turn_text += text
             return
+        if self.phase == Phase.CODING:
+            self._work_text += text  # all he writes in a turn of work, for the line noting what he fixed
         if self._live_view is None and not self._speaking:
             self._main_text_started()
         if self._speaking:
@@ -1932,6 +1939,7 @@ class MainWindow(QMainWindow):
             # Programming, Code Review), all he says in the turn goes to the chat.
             cut = None if self._talking() else HEADING_LINE.search(self._reply_text)
             shown = self._reply_text[: cut.start()] if cut else self._reply_text
+            shown = FIXED_TAIL.sub("", FIXED_RE.sub("", shown))  # his note of what he fixed is not for the chat
             if not may_become_skip(shown):  # hold it back while it could still be just "[skip]"
                 self._reply_live.set_status("")
                 self._reply_live.update_text(shown)
@@ -1963,6 +1971,7 @@ class MainWindow(QMainWindow):
             talking = self._talking()
             cut = None if talking else HEADING_LINE.search(self._reply_text)
             reply = (self._reply_text[: cut.start()] if cut else self._reply_text).strip()
+            reply = FIXED_TAIL.sub("", FIXED_RE.sub("", reply)).strip()
             if is_skip(reply):
                 self._drop_skipped(bubble, "· nothing to change - no reply needed")
             elif talking and reply:
@@ -2156,6 +2165,9 @@ class MainWindow(QMainWindow):
 
         # The view deliberately stays on whatever tab the user is reading; status lines go to both logs.
         self._turn_text = ""
+        work, self._work_text = self._work_text, ""
+        if self.run.mode == "review" and self.run.findings and not failed:
+            self._note_fixed(work)  # which of his findings this turn fixed - from the button or asked for
         if more:
             return
         # The agent is idle now: a chat message it picked up but never answered in words gets a closing line.
@@ -2460,29 +2472,62 @@ class MainWindow(QMainWindow):
         section = re.split(r"(?im)^#+\s*findings\s*$", review, maxsplit=1)
         body = re.split(r"(?m)^#+\s", section[-1], maxsplit=1)[0] if len(section) > 1 else review
         self.run.findings = [" ".join(m.group(2).split()) for m in re.finditer(r"(?m)^\s*(\d+)[.)]\s+(.+)$", body)]
+        self.run.fixed = set()
+        self._build_fix_menu()
+
+    def _build_fix_menu(self) -> None:
+        """One entry per finding - the ones he has fixed greyed out with a ✓, so the numbers stay those of the
+        review - and one for all the rest."""
+        run = self.run
         self.fix_menu.clear()
-        for n, finding in enumerate(self.run.findings, 1):
+        for n, finding in enumerate(run.findings, 1):
             label = shorten(finding.replace("`", "").replace("**", ""), 90)
-            self.fix_menu.addAction(f"{n}. {label}", lambda n=n: self._fix(n))
-        if len(self.run.findings) > 1:
+            if n in run.fixed:
+                self.fix_menu.addAction(f"✓ {n}. {label}  (fixed)").setEnabled(False)
+            else:
+                self.fix_menu.addAction(f"{n}. {label}", lambda n=n: self._fix(n))
+        open_ = self._open_findings()
+        if len(open_) > 1:
             self.fix_menu.addSeparator()
-            self.fix_menu.addAction("All of them, most serious first", lambda: self._fix(0))
+            rest = "All of them" if len(open_) == len(run.findings) else f"All the rest ({len(open_)})"
+            self.fix_menu.addAction(f"{rest}, most serious first", lambda: self._fix(0))
         self._update_buttons()
 
-    def _fix(self, n: int) -> None:
-        """Code Review: have him fix finding `n` (0: all of them) - the same as when the person he talks to asks
-        for it in the chat, and at the effort he judged the review needed."""
+    def _open_findings(self) -> list[tuple[int, str]]:
         run = self.run
-        if not (self.main and self.main.running and run and run.findings) or self.main.busy:
+        return [(n, f) for n, f in enumerate(run.findings, 1) if n not in run.fixed] if run else []
+
+    def _note_fixed(self, text: str) -> None:
+        """Code Review: a turn has ended - which of his findings did it fix (FIXED_RE)? Whoever asked for it."""
+        run = self.run
+        found = {int(n) for m in FIXED_RE.finditer(text) for n in re.findall(r"\d+", m.group(1))}
+        new = sorted(n for n in found if 1 <= n <= len(run.findings) and n not in run.fixed)
+        if not new:
             return
-        if n:
-            text = f"Please fix finding {n} from your review: {run.findings[n - 1]}"
-            title = f"🛠 Fix finding {n}"
-        else:
-            text = f"Please fix all {len(run.findings)} findings from your review, most serious first."
-            title = "🛠 Fix all findings"
-        request = self.chat.add("agent", title, text)
-        self._deliver_to_agent(text, [], [], False, heard_bubble=request, effort=run.effort, spoken=False)
+        run.fixed.update(new)
+        which = ", ".join(map(str, new))
+        self.plan_view.append_markdown(f"*✓ Finding{'s' * (len(new) > 1)} {which} fixed.*")
+        self.activity_view.append_markdown(f"✓ **Fixed:** finding{'s' * (len(new) > 1)} {which} of the review.")
+        self._build_fix_menu()
+
+    def _fix(self, n: int) -> None:
+        """Code Review: he fixes finding `n` (0: all the rest) - on his own initiative, so he says it as his own
+        plan, not as an answer to anyone (a fix the person he talks to asks for goes through the chat instead).
+        At the effort he judged the review needed."""
+        run = self.run
+        if not (self.main and self.main.running and run) or self.main.busy:
+            return
+        findings = [(n, run.findings[n - 1])] if n else self._open_findings()
+        if not findings:
+            return
+        setup = run.given is None and not run.manifest.exists()
+        body = prompts.own_fix_prompt(findings, str(run.manifest) if setup else "")
+        shown = (f"Finding {n} · {shorten(findings[0][1].replace('`', '').replace('**', ''), 120)}" if n
+                 else "Findings " + ", ".join(str(k) for k, _ in findings))
+        request = self.chat.add("agent", "🛠 Fix button", shown)
+        self._deliver_to_agent(shown, [], [], False, heard_bubble=request, effort=run.effort, spoken=False,
+                               prompt=body)
+        request.set_status("· his own next step - nobody asked")
 
     def _run_tests(self) -> None:
         """Pair Programming: the agent runs the tests and says in the chat what came out - quick work, at low
@@ -2774,9 +2819,10 @@ class MainWindow(QMainWindow):
 
     def _deliver_to_agent(self, heard: str, imgs: list, files: list, interrupt_first: bool,
                           heard_bubble: MessageBubble | None = None, note: str = "", said: str = "",
-                          agent: str = "", effort: str = "", spoken: bool = True) -> None:
+                          agent: str = "", effort: str = "", spoken: bool = True, prompt: str = "") -> None:
         """Hand a message to the coding session and set up the chat bubble its reply will appear in.
         `spoken` False: the message was not heard but typed or made by the app (no speech-to-text note).
+        `prompt`: the message itself, made by the caller (his own next step, not a request: _fix).
 
         `said` is the short first reaction the developer has already given in the chat (Ask shows it at once,
         because this session takes a while): the session is told, so that it does not acknowledge again.
@@ -2796,7 +2842,9 @@ class MainWindow(QMainWindow):
         # Working on a copy of the user's folder: what he has changed there is not in front of the person he
         # answers until the user has brought it over, so he must not speak of it as done.
         unseen = self._project_state()[0]
-        if talking:
+        if prompt:
+            body = prompt + extra
+        elif talking:
             # Pair Programming / Code Review: done then and there, talked through in the chat.
             # Code that came only as screenshots or files is put in his folder, as it is, before his first change.
             setup = self.run.given is None and not self.run.manifest.exists()

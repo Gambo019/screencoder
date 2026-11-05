@@ -186,7 +186,8 @@ For code the developer reviews: a PR, a diff, files or a folder.
 3. After that, what the person you talk to says decides what happens:
    - A question about a finding or the code is answered (by the quick model, or by him), and nothing is changed.
    - "Fix that" - asked out loud (⚡ Ask), in a remote message, or with ↪ Send to agent - goes to him at once: he fixes it in his copy and talks it through in the chat, as in Pair Programming.
-   - **🛠 Fix…** does the same from a menu: it lists his findings ("1. [bug] src/orders.py:16-18 - …") and *All of them*; pick one and he fixes it, at the effort he judged the review needed.
+   - **🛠 Fix…** lists his findings ("1. [bug] src/orders.py:16-18 - …") and *All of them*; pick one and he fixes it, at the effort he judged the review needed. This is his own next step, not a reply: he says it as his plan ("I'll fix … first, since …"), never "okay, sure" - that is for a fix the person he talks to asked for.
+   - However a finding gets fixed - from the Fix menu or asked for in the chat ("fix the first bug") - he notes which numbers it dealt with on a line the app reads and never shows. That finding then stays in the Fix menu greyed out with a ✓ (the numbers stay those of the review), *All of them* becomes *All the rest (n)*, and the Review tab gets "✓ Finding 2 fixed.". Once all are fixed, the button is off; 🔍 Get Review starts a fresh list.
    - While he is still reviewing, the quick answers speak of it as going through the code ("I'm still going through the rest of it"), and pass on what they have found so far.
 4. **🔍 Get Review** reviews again (for example after fixes; the Fix menu then lists the new findings); **💡 Get Understanding** explains what the code does, from a copy.
 

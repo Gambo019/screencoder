@@ -406,24 +406,59 @@ def work_request_prompt(text: str, said: str = "", unseen: list[str] | None = No
             "[Request from the person you are pair-programming with]")
     only_if = (" If it only asks about the code or a finding, answer it and change nothing; fix something only "
                "when you are asked to." if reviewing else "")
-    # Before a word is said: anything written while it is done would be shown in the chat as a step he narrates
-    # (measured: "First I'll get the file in place." when it came after the reply).
-    setup = ""
-    if manifest:
-        setup = ("[First, before you write a single word]\nYour working directory does not have the code yet - it "
-                 "came with the task. If this message asks for a change, do this now, before any text, with tool "
-                 f"calls only and no word about it - no sentence before it or after it:\n{setup_steps(manifest)}\n\n")
     return f"""\
 {head}
 {text or "(see the attached images/files)"}{unseen_note(unseen or [])}
 
-{setup}{chat_reply(said)} Then do what it asks: small and focused, in the code's own style and conventions, \
-touching only what it needs. {STAY_INSIDE}{only_if} Before each step of the change itself, write one short spoken \
-sentence on what you are doing - it is shown in the chat as you go, so the person can follow along; these \
-sentences are about the code, never about files, folders or getting anything ready. When a change is made, run \
-the relevant tests, or the code itself, if you can. End with one or two spoken sentences on what you changed and \
-how you checked it. No headings, no Result section and no code listings in what you write - the code is in the \
-files."""
+{_setup_first(manifest)}{chat_reply(said)} Then do what it asks: {_work_rules(only_if)}{FIXED_RULE if reviewing else ""}"""
+
+
+# Code Review: after a fix he notes which of his numbered findings it dealt with, on a line the app reads and
+# never shows - so that the Fix menu marks them, whoever asked for the fix.
+FIXED_MARK = "[fixed:"
+FIXED_RULE = (
+    "\n\nIf you fixed any of the numbered findings of your review in this turn, end with a line of its own: "
+    f"`{FIXED_MARK} 2]` (or `{FIXED_MARK} 1, 3]`) - the numbers as in your review. That line is for the record "
+    "and is not shown; leave it out if you fixed none."
+)
+
+
+def _setup_first(manifest: str) -> str:
+    """Putting code that came with the task into the working directory, before a word is said: anything written
+    while it is done would be shown in the chat as a step he narrates (measured: "First I'll get the file in
+    place." when it came after the reply)."""
+    if not manifest:
+        return ""
+    return ("[First, before you write a single word]\nYour working directory does not have the code yet - it came "
+            "with the task. If you are going to change anything, do this now, before any text, with tool calls only "
+            f"and no word about it - no sentence before it or after it:\n{setup_steps(manifest)}\n\n")
+
+
+def _work_rules(only_if: str = "") -> str:
+    """How a change is made and talked through in the chat (Pair Programming, Code Review)."""
+    return (f"small and focused, in the code's own style and conventions, touching only what it needs. {STAY_INSIDE}"
+            f"{only_if} Before each step of the change itself, write one short spoken sentence on what you are doing "
+            "- it is shown in the chat as you go, so the person can follow along; these sentences are about the "
+            "code, never about files, folders or getting anything ready. When a change is made, run the relevant "
+            "tests, or the code itself, if you can. End with one or two spoken sentences on what you changed and "
+            "how you checked it. No headings, no Result section and no code listings in what you write - the code "
+            "is in the files.")
+
+
+def own_fix_prompt(findings: list[tuple[int, str]], manifest: str = "") -> str:
+    """Code Review: he moves on to fixing his own findings - his own decision, which nobody asked for. So it is
+    said as a plan of his ("I'll fix the double discount first, since..."), never as an answer to someone."""
+    which = "\n".join(f"{n}. {finding}" for n, finding in findings)
+    these = "this finding" if len(findings) == 1 else "these findings, most serious first"
+    return f"""\
+[Your own next step - nobody has asked for it]
+You have decided to fix {these} from your review now:
+{which}
+
+{_setup_first(manifest)}Say so first, in one short spoken sentence of your own, as your own decision: what you are \
+going to fix and, in a few words, why it comes first - the shape of "I'll fix <what> in <where> first, since <why \
+it matters most>", in your own words each time. It is not a reply to anyone: no "okay", "sure", "got it", \
+"right", "you're right" or "as you asked". Then fix it: {_work_rules()}{FIXED_RULE}"""
 
 
 TESTS_REQUEST = ("Run the tests now - or, if there are none, run the code on a quick example - and tell me what "
