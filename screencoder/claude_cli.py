@@ -93,6 +93,7 @@ class ClaudeSession(QObject):
         self.session_id = ""
         self.total_cost = 0.0
         self.entries = 0  # messages and tool results in the conversation so far: grows whenever it moves on
+        self.thinking = True  # whether it thinks before answering (set_thinking)
         self._pending: deque[str] = deque()  # fingerprints of sent messages not yet consumed
         self._turn_active = False
         self._stopping = False
@@ -170,6 +171,33 @@ class ClaudeSession(QObject):
         self._pending.append(token)
         self._write({"type": "user", "message": {"role": "user", "content": content}})
         return token
+
+    def set_effort(self, effort: str | None) -> None:
+        """Think at this effort from the next request on (the CLI applies it at once, between turns too). The
+        conversation is cached once more at the new level, so it is worth it only for a change of phase."""
+        if not effort or effort == self.effort:
+            return
+        self.effort = effort  # a copy of this session must use the same level to share its cache
+        if self.running:
+            self._write({
+                "type": "control_request",
+                "request_id": f"req_{uuid.uuid4().hex[:12]}",
+                "request": {"subtype": "apply_flag_settings", "settings": {"effortLevel": effort}},
+            })
+
+    def set_thinking(self, on: bool) -> None:
+        """Think before answering, or not (thinking budget 0), from the next request on; the CLI applies it at
+        once. Measured: in effect for the very next request, and switched back by "on". Like an effort change,
+        it reads the conversation into the cache once more."""
+        if on == self.thinking:
+            return
+        self.thinking = on
+        if self.running:
+            self._write({
+                "type": "control_request",
+                "request_id": f"req_{uuid.uuid4().hex[:12]}",
+                "request": {"subtype": "set_max_thinking_tokens", "max_thinking_tokens": None if on else 0},
+            })
 
     def interrupt(self) -> None:
         if self.running:

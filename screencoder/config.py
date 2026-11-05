@@ -17,10 +17,25 @@ SETTINGS_FILE = HOME_DIR / "settings.json"
 CODING_MODELS = ["claude-opus-4-8", "claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1"]
 SIDE_MODELS = ["claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5", "claude-sonnet-5-5"]
 EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"]
-# Task language choices. "Other" lets the agent follow the problem. With "Vibe-Coding" the developer writes no
-# code himself: he directs a coding agent outside this app (plans, writes its prompts, reviews its work).
-LANG_OTHER, LANG_NON_CODING = "Other", "Vibe-Coding"  # constant name is historical; the shown label is Vibe-Coding
-LANGUAGES = ["Python", "JavaScript", "TypeScript", "C#", "Java", "C", "C++", "Go", LANG_OTHER, LANG_NON_CODING]
+# The kinds of session (the Mode box), each with its own flow, all in the language of the code at hand:
+# "DSA" - a self-contained problem to solve: an algorithm, a SQL query, a function to fix;
+# "Pair Programming" - an existing codebase, changed request by request while he talks it through;
+# "Code Review" - he reviews given code, findings first, then fixes what he is asked to;
+# "Vibe-Coding" - he writes no code himself: he directs a coding agent outside this app.
+MODE_DSA, MODE_PAIR, MODE_REVIEW, MODE_VIBE = "DSA", "Pair Programming", "Code Review", "Vibe-Coding"
+MODES = {MODE_DSA: "dsa", MODE_PAIR: "pair", MODE_REVIEW: "review", MODE_VIBE: "vibe"}
+# The code is written in the language the problem or the codebase is in (prompts.language_note).
+LANG_OTHER = "Other"
+# Where the code really is for the person he talks to (the "Code in" box): he speaks of it that way
+# (prompts.place_note). His own working folder is never theirs to hear about.
+PLACES = ["Local IDE", "Online IDE", "GitHub"]
+
+
+def mode_of(label: str) -> str:
+    """The kind of session a Mode choice means: "dsa", "pair", "review" or "vibe"."""
+    return MODES.get(label, "dsa")
+
+
 TEXT_SCALES = [1.0, 1.15, 1.25, 1.35, 1.5, 1.75, 2.0, 2.5]
 PERMISSION_MODES = {
     "acceptEdits": "Edit files only - shell commands are denied",
@@ -34,6 +49,12 @@ def supports_effort(model: str) -> bool:
     return "haiku" not in model.lower()
 
 
+def can_skip_thinking(model: str) -> bool:
+    """Can the CLI switch thinking off for this model (set_max_thinking_tokens 0)? The 4.x models; on the 5.x
+    and Fable models thinking cannot be disabled."""
+    return model.startswith("claude-") and "-4-" in model
+
+
 def can_run_commands(permission_mode: str) -> bool:
     return permission_mode in ("auto", "bypassPermissions")
 
@@ -42,12 +63,14 @@ def can_run_commands(permission_mode: str) -> bool:
 class Settings:
     claude_path: str = ""
     coding_model: str = "claude-opus-4-8"
+    # Vibe-Coding only. A coding task's agent picks its level itself: it judges each piece of work (main_window
+    # COPY_EFFORT, _work_effort).
     coding_effort: str = "xhigh"
     side_model: str = "claude-opus-4-8"  # measured: first words ~1 s on a warm session, as quick as Sonnet
     side_effort: str = "medium"
     permission_mode: str = "acceptEdits"
-    review_plan: bool = False
-    language: str = "Python"
+    mode: str = MODE_DSA  # the Mode box (a key of MODES)
+    code_place: str = "Local IDE"  # the "Code in" box (one of PLACES)
     # A name for the AI developer (coding agent + quick answers). The person talking to it (the interviewer)
     # may address it by this name; empty means no name. Woven into the system prompt (see prompts.name_note).
     dev_name: str = ""
@@ -91,8 +114,15 @@ class Settings:
         for key, value in data.items():
             if key in known and isinstance(value, type(getattr(settings, key))):
                 setattr(settings, key, value)
-        if settings.language == "Non-coding":  # the label was renamed to "Vibe-Coding"
-            settings.language = LANG_NON_CODING
+        if settings.mode not in MODES:
+            settings.mode = MODE_DSA
+        if settings.code_place not in PLACES:
+            settings.code_place = PLACES[0]
+        if "mode" not in data:
+            # Before the Mode box, the kind of session was picked among the programming languages ("language"):
+            # a language meant a problem to solve.
+            old = data.get("language")
+            settings.mode = MODE_VIBE if old in ("Non-coding", MODE_VIBE) else old if old in MODES else MODE_DSA
         return settings
 
     def save(self) -> None:

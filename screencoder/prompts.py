@@ -21,8 +21,11 @@ AGENT_MARK = "[agent]"
 # The working session takes a while to answer, so with the marker the quick model also gives what the developer
 # says straight away - two short sentences. The app shows them at once and tells the working session.
 HOLD_LINE = (
-    f"answer with {AGENT_MARK} followed, on the same line, by what you say out loud straight away while you "
-    "turn to it - two short sentences, about twenty words in all and never more than thirty - and then stop. Write it at once, "
+    f"answer with {AGENT_MARK}, then how much thinking the work itself will take, in brackets: [low] (a line or "
+    "two), [medium] (a small, clear change), [high] (a tricky change or several places), [xhigh] (a large or "
+    "hard rework) or [max] (exceptionally hard) - and then, on the same line, what you say out loud straight "
+    "away while you turn to it - two short sentences, about twenty words in all and never more than thirty - "
+    "and then stop. Write it at once, "
     "without reading any file first. The first sentence shows you took in what was said, by putting the request "
     "or the point in your own words; the second buys you a moment by saying what you are going to think "
     "through ('Understood - you'd like mode to return None for an empty list. Give me a moment to work out "
@@ -32,6 +35,17 @@ HOLD_LINE = (
     "professional tone - not 'On it', 'Sure thing' or 'No problem'. "
     "Two sentences and no more: do not start on the work itself - the answer, the plan, any prompt and any code "
     "come from the session it is passed to, and whatever you write after those two sentences is thrown away."
+)
+# Before the solution is asked for (before the task, or while the developer has only read it in), a work request
+# is kept, and goes to the working session with the task or with Solve. The quick model then says so.
+QUEUE_LINE = (
+    f"answer with {AGENT_MARK} followed, on the same line, by what you say out loud straight away - two short "
+    "sentences, about twenty words in all and never more than thirty - and then stop. The first sentence puts the "
+    "request in your own words; the second says you will build it in when you work out the solution "
+    "('Understood - you'd like the parser to skip blank lines. I'll build that in when I get to the "
+    "solution.'). Worded differently from the last one you used, in a measured, professional tone, with no "
+    "answer, no plan and no code in it: the request is kept and handed on when the solution is written, and "
+    "whatever you write after those two sentences is thrown away."
 )
 
 
@@ -224,12 +238,39 @@ def _copy_parts(briefing: str, earlier: str) -> list[str]:
 
 
 def answered_note(answered: list[tuple[str, str]]) -> str:
-    """For the coding session's next message: what the quick answers said on its behalf meanwhile."""
+    """For the working session's next message: what copies of it said on its behalf meanwhile - quick answers,
+    its understanding, how it would solve it. Merged in this way, the session keeps all of it as its own."""
     if not answered:
         return ""
-    pairs = "\n\n".join(f"Q: {q}\nA: {a[:800]}" for q, a in answered[-8:])
-    return ("\n\n[Meanwhile you were asked these in the quick-answer panel, and this is what you answered - "
-            f"stay consistent with it]\n{pairs}")
+    pairs = "\n\n".join(f"Q: {q}\nA: {a[:3000]}" for q, a in answered[-10:])
+    return ("\n\n[Meanwhile you were asked these in copies of your session, and this is what you answered - it "
+            f"is your own work: stay consistent with it]\n{pairs}")
+
+
+ASKED_BY = {
+    "heard": "said to you out loud (live speech-to-text, so words may be misheard)",
+    "local": "typed by a teammate working with you at this machine",
+    "remote": "typed by a teammate helping you from another machine",
+}
+
+
+def asked_note(asked: list[tuple[str, str, str, list[str]]]) -> str:
+    """For the first message of a task: the work requests made in the chat before it started (QUEUE_LINE).
+    Each is (who asked - a key of ASKED_BY, what was asked, what was said back straight away, the labels of
+    what came with it)."""
+    if not asked:
+        return ""
+    lines = []
+    for n, (who, text, said, labels) in enumerate(asked, 1):
+        line = f"{n}. {ASKED_BY.get(who, 'asked')}: " + (text or "(see what came with it)").replace("\n", "\n   ")
+        if labels:
+            line += f"\n   Came with it: {', '.join(labels)}"
+        if said:
+            line += f"\n   You answered straight away: \"{said}\""
+        lines.append(line)
+    return ("# Asked before you started\nBefore the task began, you were asked for these in the chat, in this "
+            "order. They are part of the task: build them into your plan and your work, and keep to what you "
+            "answered.\n" + "\n".join(lines))
 
 # The coding session stays in its own folder. With a project folder given by the user that folder is a copy,
 # and the original is the user's to change.
@@ -245,8 +286,9 @@ of the same file, other open tabs, the file tree, a terminal or a problem descri
 repeat the same region: merge them using file tabs, breadcrumbs, line numbers and repeated lines, and never \
 duplicate code that appears in more than one screenshot.
 - Extract: language and framework, file names and folder structure, the full problem statement (constraints, \
-examples, required function signature / class names / input-output format), terminal output, stack traces, \
-failing tests, and highlighted or cursor lines.
+examples, required function signature / class names / input-output format; for a query problem, the table \
+schemas, the example rows and the expected output), terminal output, stack traces, failing tests, and \
+highlighted or cursor lines.
 - If something is cut off or unreadable, don't silently guess: say you can't see that part and state the \
 assumption you make (without referring to screenshots)."""
 
@@ -258,41 +300,171 @@ screenshots, images or attachments. {WATCHING_ONLY}"""
 
 def language_note(language: str) -> str:
     if language == LANG_OTHER:
-        return "Use the programming language the problem itself is written in, or the one that fits it best."
+        return ("Use the language the problem asks for or is written in, or the one that fits it best - for a "
+                "database query, the SQL dialect the problem names (MySQL if it names none) - and keep the "
+                "language of any code that already exists for changes to it.")
     return (f"Write new code in {language}. If the code that already exists in the problem is in a different "
             "language, keep that language for changes to it.")
 
 
-def _task_header(task: str, inputs: str) -> str:
+def _task_header(task: str, inputs: str, asked: str = "") -> str:
+    none = "(No text - the task is what you were asked below.)" if asked and not task else \
+        "(No text - the task is described in the screenshots.)"
     return f"""\
 # Task from the user
-{task or "(No text - the task is described in the screenshots.)"}
+{task or none}
 
 # Inputs
-{inputs}"""
+{inputs}""" + (f"\n\n{asked}" if asked else "")
 
 
-def analysis_prompt(task: str, inputs: str, workspace: str, workspace_empty: bool, language: str) -> str:
-    ws_note = "It is empty." if workspace_empty else "It already contains files - look at them first."
+# How much thinking a piece of work needs: the agent judges it, and its session then runs at that effort.
+EFFORTS = ("low", "medium", "high", "xhigh", "max")
+EFFORT_SCALE = (
+    "low (a few lines, nothing tricky), medium (a standard function or a small, clear fix), high (a tricky "
+    "algorithm, several files or many edge cases), xhigh (hard and long), max (exceptionally hard)"
+)
+# The agent replies to the warm-up with exactly this mark and its judgement (warmup_prompt).
+READY_MARK = "[ready]"
+
+# Before the task the developer answered questions in the chat: the working session is a continuation of that
+# conversation (a fork of it), so it is told where its role changes.
+ROLE_CHANGE = (
+    "[From here on you are working on a task]\n"
+    "Until now you answered questions in the chat. That stops here: you are now the developer working on the "
+    "task below, in the working directory below, and you no longer answer in the quick-answer format. "
+    "Everything said in the chat so far still counts - requirements, preferences, and what you answered."
+)
+
+
+# What the warm-up says per kind of session (config.mode_of): what to take in, and what to judge the effort of.
+WARMUP_NOW = {
+    "dsa": ("Read the task and everything that came with it now, so that you know it well. Do not solve it, plan "
+            "it, explain it or write any file yet: you will be asked for your understanding, for how you would "
+            "solve it, or for the solution itself in the next messages.",
+            "solving it will take"),
+    "pair": ("You are going to pair-program on this code: the person you are working with will ask for changes "
+             "one at a time, and you make each one while talking it through. Read it all now - the project in "
+             "the working directory if it has one, and the files and screenshots that came with the task, which "
+             "show the code when the working directory does not - its structure, the main files, how it is run "
+             "and tested, so that you know your way around it. Do not change, run or explain anything yet.",
+             "a typical change in this code will take"),
+    "review": ("You are going to review this code for the person you are talking to. Read all of it now - the "
+               "files and screenshots that came with the task, and the working directory if it has any - so that "
+               "you know it well. Do not review it, explain it or change anything yet: the review is asked for "
+               "next.",
+               "a careful review of it will take"),
+}
+
+
+# A DSA task either wants code (a solution, a query, a fix) or an answer (a multiple-choice question, a short
+# written or numeric answer): the warm-up says which, and Solve then writes code or answers.
+KIND_SCALE = (
+    "code (it wants code written or changed - a function, a program, a query, a regex, a script, a fix) or "
+    "answer (it wants an answer and no code: a multiple-choice question with one or more right options, or a "
+    "question with a short written or numeric answer, such as what a piece of code prints)"
+)
+
+
+def warmup_prompt(task: str, inputs: str, workspace: str, workspace_empty: bool, language: str,
+                  asked: str = "", forked: bool = False, mode: str = "dsa") -> str:
+    """The first message of a task: take in the inputs, judge how heavy the work is - and, for a problem, what
+    kind of task it is (KIND_SCALE) - and nothing else: what comes next is asked for separately. `asked`: work
+    requests made in the chat before the task (asked_note); `forked`: the session continues the chat's
+    conversation (ROLE_CHANGE); `mode`: a key of WARMUP_NOW."""
+    ws_note = "It is empty." if workspace_empty else "It already contains files - read them now as well."
+    role = f"{ROLE_CHANGE}\n\n" if forked else ""
+    now, judged = WARMUP_NOW.get(mode, WARMUP_NOW["dsa"])
+    if mode == "dsa":
+        reply = (f"`{READY_MARK} effort: <level> kind: <kind>`, where <level> is how much thinking {judged} - one of "
+                 f"{EFFORT_SCALE} - and <kind> is what it asks for: {KIND_SCALE}.")
+    else:
+        reply = f"`{READY_MARK} effort: <level>`, where <level> is how much thinking {judged} - one of {EFFORT_SCALE}."
     return f"""\
-{_task_header(task, inputs)}
+{role}{_task_header(task, inputs, asked)}
 
-Working directory for the solution: `{workspace}`. {ws_note} {STAY_INSIDE}
+Working directory: `{workspace}`. {ws_note} {STAY_INSIDE}
 
 # Language
 {language_note(language)}
 
 {SCREENSHOT_GUIDE}
 
-# Phase 1 of 2 - understand and plan (do NOT create or modify any files yet)
-The user reads this before you start coding. {SPOKEN_STYLE} Use the Markdown headings below. Under \
-Understanding, Approach and Assumptions write a short paragraph of normal sentences: no bullet lists, no tables, \
-no code blocks, no line-by-line walkthroughs, and no restating of the test cases or examples one by one.
+# Right now: take it all in, and nothing else
+{now}
 
+Reply with exactly one line and nothing else: {reply}"""
+
+
+def work_request_prompt(text: str, said: str = "", unseen: list[str] | None = None, reviewing: bool = False,
+                        manifest: str = "") -> str:
+    """A request in a Pair Programming or Code Review session: done then and there, and talked through in the
+    chat as it is done. `reviewing`: the code is one he reviewed - a question about it changes nothing.
+    `manifest`: the code came as screenshots or files and is not in the working directory yet - before his
+    first change he puts it there as it is (setup_steps)."""
+    head = ("[The person you are reviewing with says]" if reviewing else
+            "[Request from the person you are pair-programming with]")
+    only_if = (" If it only asks about the code or a finding, answer it and change nothing; fix something only "
+               "when you are asked to." if reviewing else "")
+    # Before a word is said: anything written while it is done would be shown in the chat as a step he narrates
+    # (measured: "First I'll get the file in place." when it came after the reply).
+    setup = ""
+    if manifest:
+        setup = ("[First, before you write a single word]\nYour working directory does not have the code yet - it "
+                 "came with the task. If this message asks for a change, do this now, before any text, with tool "
+                 f"calls only and no word about it - no sentence before it or after it:\n{setup_steps(manifest)}\n\n")
+    return f"""\
+{head}
+{text or "(see the attached images/files)"}{unseen_note(unseen or [])}
+
+{setup}{chat_reply(said)} Then do what it asks: small and focused, in the code's own style and conventions, \
+touching only what it needs. {STAY_INSIDE}{only_if} Before each step of the change itself, write one short spoken \
+sentence on what you are doing - it is shown in the chat as you go, so the person can follow along; these \
+sentences are about the code, never about files, folders or getting anything ready. When a change is made, run \
+the relevant tests, or the code itself, if you can. End with one or two spoken sentences on what you changed and \
+how you checked it. No headings, no Result section and no code listings in what you write - the code is in the \
+files."""
+
+
+TESTS_REQUEST = ("Run the tests now - or, if there are none, run the code on a quick example - and tell me what "
+                 "came out.")
+
+
+def review_prompt(asked: str = "") -> str:
+    """Code Review: the findings, written by the session itself (it is the work the rest follows from)."""
+    note = f"{asked}\n\n" if asked else ""
+    return f"""\
+{note}# Now review it
+Review the code for the person you are talking to - out loud, as an engineer reviewing a colleague's work. \
+{SPOKEN_STYLE} Write only the sections below, under their Markdown headings. Do not change any file: fixes come \
+later, and only when you are asked for them. You may read files, and run the code or its tests to confirm a \
+suspicion before you report it.
+
+## What it does
+One or two sentences.
+
+## Findings
+A numbered list, most serious first, at most eight. Each one starts with its kind in brackets - [bug], [risk], \
+[performance], [design], [readability] or [style] - then exactly where it is, as the file's path and the line or \
+lines in backticks, then the function: for example "1. [bug] `src/orders.py:21-23`, in total() - ...". Use the \
+path as it is in the project and the line numbers the code shows (an editor's own numbering); where none are \
+shown, count from the top of the file. Then what is wrong and why it matters, and what you would change: two \
+or three spoken sentences, no code blocks. Only real findings: do not pad the list with nitpicks, and leave out \
+what is fine.
+
+## Overall
+One or two sentences: how ready it is, and the one thing you would fix first."""
+
+
+SECTION_RULES = (
+    "Under each heading write a short paragraph of normal sentences: no bullet lists, no tables, no code blocks, "
+    "no line-by-line walkthroughs, and no restating of the test cases or examples one by one."
+)
+UNDERSTANDING_SECTION = """\
 ## Understanding
 Two to four sentences: what the problem is and what you are looking at - which file or function, and what goes \
-wrong or what is being asked.
-
+wrong or what is being asked."""
+APPROACH_SECTIONS = """\
 ## Approach
 Three to five sentences: how you would solve it and why, said naturally. Mention the key idea, the root cause \
 for a bug, the complexity in passing for a DSA problem, and only the one or two edge cases that really matter.
@@ -304,9 +476,48 @@ will check the result.
 ## Assumptions / unclear parts
 Only when something is missing or ambiguous in a way that affects the solution: one or two spoken sentences \
 about it. If nothing is unclear and you are making no real assumptions, leave this section out completely - no \
-heading and no "nothing is unclear" sentence - and end after Steps.
+heading and no "nothing is unclear" sentence - and end after Steps."""
+# A job done by a copy of the working session, so that the session itself stays free (see copy_job_prompt).
+COPY_JOB_NOTE = (
+    "[A request for you, outside your work]\n"
+    "This is a separate copy of your session, made for this one request; your work goes on in your own "
+    "session, which is told what you write here. Do not change any file - changes are refused here - and do "
+    "not start on the solution. You may read files to check something."
+)
+EXPLAIN_SECTION = """\
+## The codebase
+Three to six sentences: what the project does, how it is laid out - the main files and what each one is for - \
+how a typical request flows through it, and how it is run and tested."""
+HOWTO_SECTION = """\
+## How I'd do it
+For the most recent request in the conversation - what you were last asked to change or add (if it is done \
+already, say how you went about it): three to five sentences on where in the code it goes, the steps, and the \
+one thing to be careful about."""
+# kind -> (what it is, the question as the session is later told it was asked, the sections to write).
+# Coding (DSA) and Code Review: understanding, approach; Pair Programming: explain, howto.
+COPY_JOBS = {
+    "understanding": ("your understanding of the task", "What is your understanding of the task?",
+                      UNDERSTANDING_SECTION),
+    "approach": ("how you would solve it", "How would you solve it?", APPROACH_SECTIONS),
+    "explain": ("how the codebase works", "How does this codebase work?", EXPLAIN_SECTION),
+    "howto": ("how you would do the latest request", "How would you do what was just asked?", HOWTO_SECTION),
+}
 
-You may use read-only tools (Read, Glob, Grep) on the saved inputs or the working directory."""
+
+def copy_job_prompt(kind: str, earlier: str = "", own: bool = False, latest: str = "") -> str:
+    """What a copy of the working session is asked (COPY_JOBS). `earlier`: what it said meanwhile in other
+    copies, which its own session has not been told yet. `own`: asked of the session itself (one that cannot be
+    copied) - it writes it while it waits. `latest`: the most recent request in the chat, for "howto"."""
+    what, _asked, sections = COPY_JOBS[kind]
+    parts = ["[A request for you - do not start on the solution or change any file yet]" if own else COPY_JOB_NOTE]
+    if earlier and not own:
+        parts.append("## What you said meanwhile, in other copies of your session (stay consistent with it)\n"
+                     + earlier)
+    if latest and kind == "howto":
+        parts.append(f"## The latest request in the chat\n{latest}")
+    parts.append(f"# Now: {what}\nThe user reads this. {SPOKEN_STYLE} Write only the section(s) below, under "
+                 f"their Markdown headings. {SECTION_RULES}\n\n{sections}")
+    return "\n\n".join(parts)
 
 
 CHAT_REPLY = (
@@ -335,44 +546,114 @@ def chat_reply(said: str = "") -> str:
     )
 
 
-def revise_prompt(feedback: str, chat_reply_first: bool = False, said: str = "") -> str:
-    reply = f"{chat_reply(said)} Then update" if chat_reply_first else "Update"
+def hold_prompt(text: str, said: str = "") -> str:
+    """A message sent straight to the working session before it has started on the solution."""
     return f"""\
-The user reviewed your plan and replied:
+[Message from the user - you have not started on the solution yet]
+{text or "(see the attached images/files)"}
 
-{feedback}
-
-{reply} your understanding and plan accordingly, using the same headings and the same short, spoken style \
-(again leaving out Assumptions / unclear parts when there is nothing to say). Still do NOT create or modify files."""
+{chat_reply(said)} Then stop: do not solve anything or write any file yet - keep it in mind for when you are \
+asked to solve the task."""
 
 
-def implement_prompt(workspace: str, can_run: bool, language: str, manifest: str, feedback: str = "") -> str:
-    note = f"\nThe user approved the plan and added:\n\n{feedback}\n" if feedback.strip() else ""
+# Problems that are not functions to call: a query is checked against the example tables, anything else as
+# closely as it can be.
+QUERY_CHECK = (
+    "Not everything is a function to call: for a SQL query, build the example tables in SQLite (Python's sqlite3 "
+    "module), run the query against them and compare with the expected output - minding where SQLite differs "
+    "from the dialect you write in; for other code with nothing to call - a regex, a shell command, a "
+    "configuration - check it the closest way you can."
+)
+
+
+def answer_prompt(can_run: bool, asked: str = "") -> str:
+    """Solve, for a task that wants an answer and no code (KIND_SCALE): a multiple-choice question, a short
+    written or numeric answer. `asked`: work requests kept for this moment (asked_note)."""
+    note = f"{asked}\n\n" if asked else ""
+    check = ("First, before you write anything: run every piece of code a question asks about - what it prints "
+             "or returns, whether it compiles - all of it in one go (one scratch file in the working directory), "
+             "and go by what it prints, not by what you expect. " if can_run else
+             "Shell commands are disabled here, so first trace any code a question asks about by hand, line by "
+             "line. ")
+    return f"""\
+{note}# Now answer it
+Answer it now, for the person you are talking to. {check}Settle every answer before you write it down: never \
+write an answer and then correct it. Do not write any solution files: the answer itself is all that is wanted.
+
+Write only this, under the heading "## Answer":
+- For a multiple-choice question: the option or options you choose, in bold, exactly as they are labelled (the \
+letter or number, and the option's text) - every right option when more than one can be right, and only \
+those. Then one or two spoken sentences on why, and, if it helps, half a sentence on why a tempting wrong \
+option is wrong.
+- For any other question: the answer itself in bold, then one or two spoken sentences on why.
+- Several questions: answer each in turn, numbered as they are.
+{SPOKEN_STYLE}"""
+
+
+# Where the code is for the person he talks to (config.PLACES): what he says about it follows from this. His own
+# working directory is a private place to work; for them, the code has always been where they see it.
+PLACE_NOTES = {
+    "Local IDE": "The code is in a code editor (an IDE) on the computer of the person you are talking to, and they "
+                 "see it there: speak of it as that project and its files and lines (\"I'll change line 21 of "
+                 "orders.py\").",
+    "Online IDE": "The code is in an online code editor in the browser (such as CoderPad, HackerRank or CodeSignal) "
+                  "that the person you are talking to sees too: speak of it as that editor - the code, its lines, "
+                  "running it - and never of a project folder, of files being set up or copied, or of anything on "
+                  "your own machine.",
+    "GitHub": "The code is on GitHub - a repository or a pull request that the person you are talking to has open: "
+              "speak of it the way you would there - the PR or the repo, its files and their line numbers, and, for "
+              "a change, the edit you would make or suggest on that line.",
+}
+
+
+def place_note(place: str) -> str:
+    """For a system prompt: where the code is, as the person he talks to sees it (PLACE_NOTES)."""
+    note = PLACE_NOTES.get(place)
+    if not note:
+        return ""
+    return (f"\n\n# Where the code is\n{note} Your working directory is only your own place to work: never mention "
+            "it, nor how the code got there.")
+
+
+def setup_steps(manifest: str) -> str:
+    """The first two steps of a change to code that came as screenshots or files: what is original is put in the
+    working directory as it is, so that the app shows exactly what was changed. Both are silent: for the person
+    he talks to, the code has been in front of him all along."""
+    return f"""\
+1. Bookkeeping: use the Write tool to save the list of files that already exist in the problem to \
+`{manifest}` - one path per line, relative to the working directory, nothing else. Write an empty file if the \
+problem comes with no existing code.
+2. For each of those files that is not yet in the working directory, create it exactly as it is in the \
+problem: same names, signatures, style and comments, with no fixes and no additions of your own. Files that \
+are already in the working directory stay as they are.
+Both steps are silent: never mention them - not in a note, not in what you say, not as "setting up" or \
+"getting the file in place". For the person you are talking to, the code has been in front of you all along."""
+
+
+def solve_prompt(workspace: str, can_run: bool, language: str, manifest: str, asked: str = "") -> str:
+    """Solve the task now. `asked`: work requests kept for this moment (asked_note)."""
+    note = f"\n{asked}\n" if asked else ""
     verify = (
         "Prove it works before you finish, by running things, in this order: (1) compile or syntax-check every "
         "file you wrote or changed; (2) run the examples from the problem and any tests it came with; (3) call "
         "every public function and method of the original code directly, on a fresh object, at least once - not "
         "only through your main entry point - and check the results. If anything fails, fix it and run all three "
-        "again. Do not write the Result section while a check is failing or has not been run."
+        "again. Do not write the Result section while a check is failing or has not been run. " + QUERY_CHECK
         if can_run
         else "Shell commands are disabled in this session (they will be denied), so check it by hand before you "
         "finish: re-read every file you wrote line by line for syntax errors, trace the examples from the problem "
-        "through your code, and walk through a direct call to every public function and method of the original "
-        "code on a fresh object. Say plainly in the Result that the code was not executed."
+        "through your code (a query: row by row against the example tables), and walk through a direct call to "
+        "every public function and method of the original code on a fresh object. Say plainly in the Result that "
+        "the code was not executed."
     )
     return f"""\
-# Phase 2 of 2 - implement
+# Now solve it
 {note}
-Implement your plan now in the working directory `{workspace}`. {STAY_INSIDE} {language_note(language)}
+Solve the task now, in the working directory `{workspace}`. If you have not said yet how you would solve it, \
+start with a one-line note on your approach. {STAY_INSIDE} {language_note(language)}
 
 Work in this order, so the app can show the user exactly which files are original and what you changed:
-1. Bookkeeping (silent - never mention it in your notes): use the Write tool to save the list of files that \
-already exist in the problem to `{manifest}` - one path per line, relative to the working directory, nothing \
-else. Write an empty file if the problem comes with no existing code.
-2. For each of those files that is not yet in the working directory, create it exactly as it is in the \
-problem: same names, signatures, style and comments, with no fixes and no additions of your own. Files that \
-are already in the working directory stay as they are. If you mention this step in a note, call it "setting \
-up the project files" - never recreating, restoring, copying or reconstructing them.
+{setup_steps(manifest)}
 3. Only then make your changes: edit those files and add new ones as needed.
 
 Rules for the code you write:
@@ -632,20 +913,24 @@ LEAD_TURN_QUIET = (
 )
 
 
-def lead_start_prompt(task: str, inputs: str, workspace: str, shared: bool, workspace_empty: bool) -> str:
-    """First message to the developer who directs an external coding agent: understand and clarify."""
+def lead_start_prompt(task: str, inputs: str, workspace: str, shared: bool, workspace_empty: bool,
+                      asked: str = "") -> str:
+    """First message to the developer who directs an external coding agent: understand and clarify.
+    `asked`: the work requests made in the chat before the task started (asked_note)."""
     if shared:
         state = "It is empty right now." if workspace_empty else "It already contains files - look at them first."
         ws = (f"The agent works in `{workspace}`. You can read that folder at any time to see what it has made "
               f"or is making; you cannot change or run anything in it. {state}")
     else:
         ws = "You have no access to the folder the agent works in: you know its work from what comes back to you."
+    none = "(It is what you were asked below.)" if asked and not task else "(It is described in the screenshots.)"
+    asked = f"\n\n{asked}" if asked else ""
     return f"""\
 # The task you have been given
-{task or "(It is described in the screenshots.)"}
+{task or none}
 
 # Inputs
-{inputs}
+{inputs}{asked}
 
 # The agent's workspace
 {ws}
@@ -837,8 +1122,16 @@ def steer_prompt(text: str, said: str = "", unseen: list[str] | None = None) -> 
 {chat_reply(said)} Then carry on with the task, taking the message into account."""
 
 
-def _forward_rule(can_forward: bool, number: int) -> str:
-    """How the quick model treats requests that need the code itself changed."""
+def _forward_rule(can_forward: bool, number: int, queue: bool = False) -> str:
+    """How the quick model treats requests that need the code itself changed. `queue`: no task has started
+    yet, and such a request is kept for it (QUEUE_LINE)."""
+    if queue:
+        return (
+            f"({number}) A request to do work on the code - write, build, change, add, fix, handle another case, "
+            "add a test, use an approach - that the solution should include: you have not started on the solution "
+            f"yet, so {QUEUE_LINE} Use this only for real work requests; questions (why, how, what "
+            "if, how fast, what would you do) you answer yourself."
+        )
     if can_forward:
         return (
             f"({number}) A request to do work on the code or the plan - change, add, fix, rewrite, rename, "
@@ -874,8 +1167,11 @@ def side_prompt(
     doing: str = "",
     briefing: str = "",
     earlier: str = "",
+    queue: bool = False,
 ) -> str:
-    """`given`: `workspace` is the user's own project folder - what the person asking sees - while the coding
+    """`queue`: no task has started yet (`task` None); a work request is kept for it (_forward_rule).
+
+    `given`: `workspace` is the user's own project folder - what the person asking sees - while the coding
     itself happens in a copy the quick model is told nothing about (SIDE_WHERE_GIVEN). `pending` / `landed`
     then name the developer's changes that are not / are in that folder at this moment, and `doing` holds the
     pending ones themselves. While anything is pending, the work log is left out: it reads as finished work.
@@ -928,14 +1224,14 @@ def side_prompt(
             f"Decide what this is, in this order. (1) Not a question or request for you (cut off, filler, small "
             f"talk, a remark that needs no reply): answer with exactly {SKIP_MARK} and nothing else. It may also "
             "be the rest of something you skipped a moment ago: then put the pieces together and treat the whole "
-            f"thing as one message. {_forward_rule(can_forward, 2)} (3) Otherwise it is a question: answer it as "
+            f"thing as one message. {_forward_rule(can_forward, 2, queue)} (3) Otherwise it is a question: answer it as "
             f"the developer doing this work, talking about it as your own: {FIRST_PERSON} Say it the way you "
             "would say it out loud - the direct answer first, then your reasoning in a sentence or two if it "
             "helps. Keep it short, and do not comment on how the question reached you."
         )
     else:
         parts.append(f"---\n# The user's question\n{question or '(see the attached images/files)'}")
-        parts.append(f"{_forward_rule(can_forward, 1)} Otherwise answer as the developer doing this work, the "
+        parts.append(f"{_forward_rule(can_forward, 1, queue)} Otherwise answer as the developer doing this work, the "
                      f"way you would say it out loud, and keep it short. {FIRST_PERSON}")
     if attachments:
         parts.append(f"Attached with the question:\n{attachments}")

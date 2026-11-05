@@ -220,6 +220,12 @@ class ApiAgentSession(QObject):
         QTimer.singleShot(0, self._pump)
         return token
 
+    def set_effort(self, effort: str | None) -> None:
+        """ClaudeSession's effort switch: these APIs are driven without an effort level, so nothing changes."""
+
+    def set_thinking(self, on: bool) -> None:
+        """ClaudeSession's thinking switch: these APIs are driven without thinking, so nothing changes."""
+
     def interrupt(self) -> None:
         # Deferred like ClaudeSession's async "result": lets the caller's handler run after this returns, and
         # avoids re-entering _pump from inside interrupt().

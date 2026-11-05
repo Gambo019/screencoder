@@ -90,6 +90,9 @@ class SettingsDialog(QDialog):
         self.side_provider.currentIndexChanged.connect(self._update_coding_note)
         self._update_coding_note()
         self.coding_effort = _combo(EFFORT_LEVELS, settings.coding_effort)
+        self.coding_effort.setToolTip("Vibe-Coding only. In a coding task the agent judges the effort itself: it "
+                                      "takes the task in and gives its understanding and approach at medium, and "
+                                      "solves each piece of work at the level it judges that work needs.")
         self.side_effort = _combo(EFFORT_LEVELS, settings.side_effort)
         self.permission = QComboBox()
         for key, label in PERMISSION_MODES.items():
@@ -184,7 +187,7 @@ class SettingsDialog(QDialog):
         form.addRow("OpenAI models", self.openai_models_edit)
         form.addRow("", self.key_status)
         form.addRow("Coding", self._pair_row(self.coding_provider, self.coding_model))
-        form.addRow("Coding effort", self.coding_effort)
+        form.addRow("Vibe-Coding effort", self.coding_effort)
         form.addRow("Quick answers (Ask)", self._pair_row(self.side_provider, self.side_model))
         form.addRow("Quick-answer effort", self.side_effort)
         form.addRow("", self.coding_note)

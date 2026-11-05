@@ -2,11 +2,23 @@
 
 A desktop app (Python + Qt) that solves coding tasks from **screenshots of your IDE**, whether that's VS Code, JetBrains or a browser-based IDE. It uses the **Claude Code CLI**:
 
-- **Coding agent:** Claude Opus 4.8 at `xhigh` (extra-high) effort reads your screenshots, files and text. It explains its understanding and plan, then writes the code.
-- **Quick answers:** while the agent works, questions heard from your PC's audio are answered within seconds without interrupting the agent. You can also steer the agent directly.
-  - During a task, each answer comes from a **copy of the coding session**: it knows everything the agent has seen, read and decided so far, while the agent carries on untouched. The copy runs with the agent's own model, effort, tools and instructions, because that lets it reuse the agent's cache: an answer then costs a few cents, where a copy with its own settings would read the whole conversation again (about 8 times as much). The copy can read files, but the CLI refuses any change it tries.
+- **One agent** (Claude Opus 4.8) holds everything: the chat, your task, its understanding, its approach and its code. Side jobs are done by **copies** of it at a suitable effort, and what a copy says is merged back into it, so nothing it knows is split between sessions.
+  - **Before a task**, the quick-answer agent is that agent: it answers in the chat from the moment the app starts.
+  - **Start** continues that conversation as the task's agent (a fork of it, now with write access and its own working folder). It takes the task in at `medium` effort, without solving anything, and judges how much thinking solving it will take (`low` … `max`).
+  - **💡 Get Understanding** and **🧭 Get How to solve** are each written by a copy of the agent at `medium` effort. They can be asked for at once, and while the agent is solving. The agent is told what they said with its next message, and so is every copy made of it until then.
+  - **▶ Solve** is done by the agent itself, at the effort it judged.
+- **Quick answers:** questions heard from your PC's audio are answered within seconds without interrupting the agent. You can also steer the agent directly.
+  - During a task, each answer comes from a **copy of the agent**: it knows everything the agent has seen, read and decided so far, while the agent carries on untouched. It runs at the quick-answer effort (`medium`), the level the agent waits at between pieces of work, so it reuses the agent's cache: an answer costs a few cents. The copy can read files, but the CLI refuses any change it tries.
+  - A request for real work is passed on to the agent, together with how much thinking the quick answer judged it needs (`[low]` … `[max]`); the agent works on it at that level. While it is busy the level only goes up, so work in progress is never cut short.
   - The agent is told what the panel answered on its behalf, with its next message, so the two stay consistent.
-  - Outside a task, with an API provider, or when the work is done on a copy of your own folder, quick answers run in a session of their own (Claude Opus 4.8 at `medium` effort by default). Working on a copy of your folder, a copy of the session would carry the agent's whole work log, which the quick answers must not see there (see below).
+  - Nothing an answer can do without is left in its way:
+    - One copy of the agent is kept **started and waiting** for the next question, so an answer does not first wait about a second for a CLI to start. A copy knows only what the agent had done when it was made, so it is renewed a second after the agent moves on, and at least every 10 s while it keeps working; it can read the files on disk for anything newer.
+    - A question asked while another answer is still being written goes to **another copy at once**, instead of waiting for that answer.
+    - When the app starts, the quick-answer session's fixed part (instructions and tools) is **cached in advance** by a one-word throwaway request, so the first question does not wait for it either. The CLI keeps that cache for an hour; it is warmed at most once an hour.
+    - What is left is the model itself: about 1.5 s to the first words of a short answer, longer when screenshots come with the question or it reads a file first.
+  - With an API provider, or when the work is done on a copy of your own folder, quick answers run in a session of their own (Claude Opus 4.8 at `medium` effort by default). Working on a copy of your folder, a copy of the session would carry the agent's whole work log, which the quick answers must not see there (see below).
+- Why the levels differ: most of an agent's time is hidden thinking (75–90% of what it wrote in real runs). In a test on a hard problem, a plan's first words came after 12 s at high and about 3 s at medium, and code written at high was no more correct. A copy only shares the agent's cache at the same level; at another level it reads the whole conversation again (about 40k tokens).
+- **Thinking off for straightforward work:** work judged `low` is done with thinking switched off altogether (Opus 4.x; the 5.x and Fable models cannot switch it off), and it is switched back on for anything heavier. At low and medium effort Opus already skips thinking on easy edits; off makes sure of it, so a simple change never waits for thinking. The switch takes effect for the next request and reads the conversation into the cache once more. Quick answers and the copies keep their default: measured, they answered just as fast either way.
 
 Both models can be changed in **Settings**. Sonnet 4.6 and Haiku 4.5 are lighter options for quick answers.
 
@@ -47,20 +59,34 @@ The window has the question-and-answer panel on the left and the code side on th
    - a screenshot of the same size as an earlier one is cut down to the rectangle where it differs from the first of them, with a note on where that is - unless that is most of it;
    - with **New part only** ticked (next to **Screen**, in both places), a screenshot that is the previous one scrolled up or down is cut down to the lines that came into view, plus a few lines for context. Leave it off when something else on screen changes between your screenshots: anything else that changed in the overlap would not be sent.
 
-   Until the plan's first words arrive, its first line shows what the agent is doing and for how long ("is thinking about the problem (12 screenshots) · 45s"), then how long it took.
+   While the agent takes the task in, the first tab shows what it is doing and for how long ("is thinking about the task (12 screenshots) · 45s"), then how long it took and the effort it judged solving needs.
 
-   Pick the **Language** for the solution. Python is the default.
-   - **Other** follows the language of the problem.
-   - **Vibe-Coding** means the developer writes no code himself: he directs your own coding agent. See [Directing an external coding agent](#directing-an-external-coding-agent-language-vibe-coding).
-2. Press **Analyze & Solve** (Ctrl+Enter). The task box disappears; **＋ New task** in the toolbar starts over for the next problem.
+   Pick the **Mode**, the kind of session. There is no language to pick: the code is always written in the language the problem or the code at hand is in (for a database query, the SQL dialect the problem names, MySQL if none).
+   - **DSA** (the default): a self-contained problem, as on HackerRank, LeetCode or a test platform. The flow below. When it takes the task in, the agent also judges what the task wants:
+     - **Code**: an algorithm, a program reading STDIN and printing to STDOUT, a function to complete or fix, a SQL query, a regex, a shell script. **▶ Solve** writes it and checks it on the examples (a query against the example tables in SQLite).
+     - **An answer**: a multiple-choice question with one or more right options, or a short written or numeric answer (such as what some code prints). The button reads **▶ Answer**: it names the option(s) exactly as labelled, or gives the answer, in bold, with a sentence or two on why - each question in turn when there are several. It writes no files. Where the answer depends on what code does, it first runs all such code in one go and goes by what it prints, and it settles every answer before writing it. Thinking stays on for answers (it takes only what a question needs): in a test without it, the model put a wrong option in bold and corrected itself a sentence later - code has its test run to catch that, an answer does not. With thinking on, the same three-question quiz was answered right in 11 s (12 s without).
+     - For a single quick question, ⚡ **Ask** with a screenshot is faster still: the quick model answers in a few seconds, without a task.
+   - **Pair Programming** and **Code Review**: see [Pair Programming](#pair-programming) and [Code Review](#code-review).
+   - **Vibe-Coding** means the developer writes no code himself: he directs your own coding agent. See [Directing an external coding agent](#directing-an-external-coding-agent-mode-vibe-coding).
+
+   Next to it, **Code in** says where the code really is for the person he talks to, so that he speaks of it that way. It is part of the agent's instructions for the whole task (and of every copy's):
+   - **Local IDE**: a project in an editor on their computer - its files and lines ("I'll change line 21 of orders.py").
+   - **Online IDE**: a browser editor you both see (CoderPad, HackerRank, CodeSignal...) - the code, its lines, running it; never a project folder, files being set up, or his own machine.
+   - **GitHub**: a repository or a pull request - its files, line numbers, and the change he would make or suggest on a line.
+
+   The code itself still comes as screenshots, files or the Workspace folder (nothing is fetched from GitHub). Whatever he does to get it into his own working folder is silent in every mode: for the person he talks to, the code has been in front of him all along.
+2. Press **▶ Start** (Ctrl+Enter). The task box disappears; **＋ New task** in the toolbar starts over for the next problem.
+   - The agent goes on from the chat so far: everything asked, answered and attached there before Start is part of what it knows.
+   - It takes the task in and does nothing else: no plan, no answer, no file. Then it waits, and the first tab says how much effort it judged solving needs.
    - **＋ New task** asks for confirmation first. On "Yes" it stops the current task if one is running and clears everything on screen: the plan, the prompts, the activity log, the files view, and the whole Q&A panel (transcript, attachments and chat).
    - It also empties the **Workspace** path, so set it again for the next task.
    - Nothing on disk is deleted: the files in the old workspace and the run folder under `~/ScreenCoder/runs/` stay.
-   - **Understanding & plan:** the agent explains the problem and how it will solve it, briefly and in a spoken style.
-     - It talks as if it is reading the code directly and never mentions screenshots.
-     - An "Assumptions / unclear parts" section appears only when something really is unclear.
-     - The view stays on this tab while the agent codes.
-     - Tick *"Let me review the plan before coding starts"* to approve, add feedback, or ask for a revised plan first.
+   - **Understanding & plan:** three buttons under it, once the agent has taken the task in.
+     - **💡 Get Understanding**: what the problem is and what it is looking at, in two to four spoken sentences.
+     - **🧭 Get How to solve**: its approach, the steps, and assumptions only when something really is unclear.
+     - Both come from copies of the agent, so they can be asked for together, again later, and while it solves. They appear one after another, in the order asked. Text only: a copy cannot change any file.
+     - **▶ Solve**: the agent writes the solution, at the effort it judged. Work requests kept from the chat go with it.
+     - It talks as if it is reading the code directly and never mentions screenshots. The view stays on this tab while the agent codes.
    - **Coding activity:** live progress, including files written, commands run and errors. Code the agent writes or changes is commented in a conversational first-person voice, like a developer thinking aloud step by step ("My plan here is simple…", "Careful: an empty input would…"). Code that already existed is left as it was.
    - **Verification:** before it finishes, the agent has to check its work.
      - It must syntax-check its files and run the problem's examples.
@@ -92,6 +118,11 @@ The window has the question-and-answer panel on the left and the code side on th
        - A request to change the code ("can you also handle…", "rename…", "add a test…") is passed on to the coding session, as if you had clicked Send to agent. The heard bubble is marked "work request - passed to the coding session".
          - The coding session takes a while to reply, so the developer first says two short sentences straight away (about 20–30 words): one that puts what was asked in his own words, and one that buys the moment. For example: "Understood - you'd like mode to return None for an empty list rather than raise. Give me a moment to work out where that check belongs." It appears within a few seconds.
          - The full reply from the coding session then appears above that. The session is told what was already said, so it does not acknowledge twice.
+       - **Before Solve** - before the task starts, and while the agent has only taken it in - a work request is kept instead of passed on. This applies to Ask and to a remote message sent to the AI.
+         - The developer says his two sentences straight away ("…I'll build that in when I get to the solution."). The heard bubble is marked "work request - goes to the agent with the task (Start)" or "… with Solve".
+         - Before the task, the task box shows "📌 N requests from the chat go to the coding agent with this task". Hover over it to list them, or click **Clear** to drop them. **Start** puts them in the task's first message: what was asked, who asked (said out loud or typed by a teammate) and what the developer answered. Start also works with an empty task box when there are kept requests; they are then the task.
+         - After Start, the line beside Solve counts them, and **Solve** puts them in its message, with the screenshots and files that came with them.
+         - **＋ New task** drops them, along with the rest of the chat.
        - Something that is not a question gets no reply.
      - **↪ Send to agent** goes to the coding session as a new instruction. It picks it up right after its current step, replies in the chat with what it will do, and adjusts the code. This needs a running task.
      - **✋ Interrupt & send** is the same as Send to agent, but stops the agent's current step first.
@@ -104,7 +135,13 @@ Every button is enabled only while what it does is possible:
 
 | Button | Enabled when |
 |---|---|
-| **Analyze & Solve** | the task box holds text or an attachment |
+| **▶ Start** | the task box holds text or an attachment, or work requests from the chat are kept for the task |
+| **💡 Get Understanding** / **🧭 Get How to solve** | the agent has taken the task in, and that copy is not already writing (with an API provider, which has no copies: the agent is free) |
+| **▶ Solve** | the agent has taken the task in, is not solving yet, and is not replying to a message |
+| **💡 Explain the code** / **🧭 How I'd do it** (Pair Programming) | as Get Understanding |
+| **🧪 Run the tests** (Pair Programming) | the agent has taken the project in and is free |
+| **🔍 Get Review** (Code Review) | the review has been written once and the agent is free |
+| **🛠 Fix…** (Code Review) | the review listed findings and the agent is free |
 | **⚡ Ask** | there is new speech, a selected part of the transcript, or an attachment in the left panel |
 | **↪ Send to agent / developer** | the same, and a task's session is running |
 | **✋ Interrupt & send** | the same, and that session is in the middle of a turn |
@@ -114,13 +151,46 @@ Every button is enabled only while what it does is possible:
 | **＋ New task** | there is a task or any history to clear |
 | **Workspace** field and **Browse…** | no task has been started yet (the folder is fixed once it runs) |
 | **Open folder** | a task has a workspace, or the typed folder exists |
-| **↻ Revise plan** | the plan is waiting for approval and feedback has been typed |
 | **↻ Refresh** / **📋 Copy code** (Output Code) | a task exists / a file is open |
 | **✋ Interrupt** / **■ Stop** | the session is in the middle of a turn / is running |
 | **✅ Agent finished** / **⏳ Agent still working** | a Vibe-Coding session is running and he has written a prompt |
 | **✔ Sent to the agent** (on each prompt) | it is the newest prompt and has not been marked as sent yet |
 
-## Directing an external coding agent (Language: Vibe-Coding)
+## Pair Programming
+
+For an existing codebase that the person you talk to changes with the developer, one request at a time.
+
+1. Add the code as screenshots or files, as for DSA - or put the project folder in **Workspace** (optional; the developer works on a copy of it, and your folder is never changed), or both. Pick **Pair Programming** and press **▶ Start**.
+2. He reads it in - its structure, the main files, how it is run and tested - and then waits: the phase reads *Ready for the next request*.
+   - Code that came only as screenshots or files is put in his folder, exactly as it is, just before his first change - so Output Code shows those files as originals, and what he changed in them (M).
+3. Every work request from the chat (Ask, or a message from the remote page) goes to him **at once** - nothing is kept for later. He does it there and then, small and focused, in the code's own style:
+   - He talks it through **in the chat** as he goes, in one bubble: what he is about to do, then what he changed and how he checked it. Between his sentences the bubble shows what he is doing ("editing inventory.py…", "running a command…").
+   - It runs at the effort the quick answer judged the request needs; straightforward ones at low, without thinking.
+   - The change is in the developer's copy (Output Code shows M/U as usual); then he waits for the next request.
+4. Questions are answered by the quick model as usual, without disturbing him.
+5. Buttons on the **Notes** tab:
+   - **💡 Explain the code**: how the codebase works - what it does, its main files, how a request flows through it, how it is tested. From a copy of the agent, merged back.
+   - **🧭 How I'd do it**: how he would do the latest request in the chat (or, if it is done, how he went about it). From a copy, merged back.
+   - **🧪 Run the tests**: he runs the tests (or the code) and says in the chat what came out - at low effort, without thinking.
+
+## Code Review
+
+For code the developer reviews: a PR, a diff, files or a folder.
+
+1. Add the code, PR or diff as screenshots or files, as for DSA - or put the folder in **Workspace** (optional; he works on a copy), or both. Pick **Code Review** and press **▶ Start**. As in Pair Programming, code that came as screenshots or files is set up in his folder as it is before his first fix.
+2. He reads it in, judges how much a careful review needs, and then **writes his findings by himself** on the **Review** tab, at that effort:
+   - *What it does*, in a sentence or two.
+   - *Findings*, most serious first, at most eight: each tagged [bug], [risk], [performance], [design], [readability] or [style], then exactly where it is - the file's path and line(s), like `src/orders.py:21-23`, and the function - then why it matters and what he would change, in spoken sentences. Line numbers are the ones the code shows (an editor's own numbering in a screenshot). No nitpick padding.
+   - *Overall*: how ready it is, and the one thing to fix first.
+   - He may read files, or run the code or its tests, to confirm a suspicion before he reports it. He changes nothing.
+3. After that, what the person you talk to says decides what happens:
+   - A question about a finding or the code is answered (by the quick model, or by him), and nothing is changed.
+   - "Fix that" - asked out loud (⚡ Ask), in a remote message, or with ↪ Send to agent - goes to him at once: he fixes it in his copy and talks it through in the chat, as in Pair Programming.
+   - **🛠 Fix…** does the same from a menu: it lists his findings ("1. [bug] src/orders.py:16-18 - …") and *All of them*; pick one and he fixes it, at the effort he judged the review needed.
+   - While he is still reviewing, the quick answers speak of it as going through the code ("I'm still going through the rest of it"), and pass on what they have found so far.
+4. **🔍 Get Review** reviews again (for example after fixes; the Fix menu then lists the new findings); **💡 Get Understanding** explains what the code does, from a copy.
+
+## Directing an external coding agent (Mode: Vibe-Coding)
 
 With **Vibe-Coding** the developer in this app writes no code. A coding agent outside the app (Claude Code, Cursor, Copilot, anything) writes it, and the developer directs that agent. Three parties are involved:
 
@@ -139,7 +209,7 @@ How the developer talks:
 Setting up:
 
 1. Put the folder your coding agent works in into **Workspace** (toolbar). The developer can read it at any time to see what the agent has made. Leave it empty if there is no folder to share; he then only knows what you show him.
-2. Add the task, pick **Vibe-Coding**, press **Analyze & Solve**.
+2. Add the task, pick **Vibe-Coding**, press **Start**. In Vibe-Coding he starts on it at once (understanding and questions), as before, at the **Vibe-Coding effort** set in Settings.
 
 Where things appear:
 
@@ -181,12 +251,12 @@ Questions from the supervisor at any time ("why does this work?", "what's the co
 
 The **Output Code** tab shows the agent's workspace and refreshes by itself every few seconds: green **U** for files the agent created since the task started, amber **M** for files it changed, with the changed lines bright.
 
-Each developer turn costs one round of the coding model. If the turns feel slow, lower the coding effort in **Settings** for this kind of task.
+Each developer turn costs one round of the coding model. If the turns feel slow, lower the Vibe-Coding effort in **Settings**.
 
 ## Workspace and permissions
 
 - **Workspace** (toolbar): leave it empty to get a fresh folder per task under `~/ScreenCoder/runs/<id>/workspace`. If the code is on your PC, point it at your project folder instead.
-- **Your project folder is never changed** (coding languages). When you give a folder:
+- **Your project folder is never changed** (DSA, Pair Programming, Code Review). When you give a folder:
   - The developer gets his own copy of it at `~/ScreenCoder/runs/<id>/workspace` and edits and runs only there. Cache folders (`__pycache__`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`) are not copied. For a very large folder (over 20,000 files or 400 MB) the app asks before copying.
   - His session is started in the copy and is not told where your folder is. It is also instructed to stay inside its working directory.
   - **You bring his changes over yourself.** The Output Code tab shows the copy: amber **M** for files he edited, green **U** for new ones, changed lines bright. **Open folder** opens the copy.
@@ -267,7 +337,7 @@ On the same network the round trip is a few milliseconds. Over the internet it i
 Settings let you change:
 - the reading text size for the plan, coding activity, transcript and chat (150% by default);
 - the speech model: Kroko (recommended: lightest, adds punctuation) or NVIDIA FastConformer, and whether PC-audio listening is on;
-- the coding model and effort, and the quick-answer model and effort (Haiku is supported; effort isn't sent for it);
+- the coding model and the **Vibe-Coding effort**, and the quick-answer model and effort (Haiku is supported; effort isn't sent for it). A coding task has no fixed effort: the agent judges each piece of work (see the top of this page);
 - a name for the AI developer (the coding agent and quick answers), so the interviewer can address it by name;
 - the CLI path;
 - the runs folder;
