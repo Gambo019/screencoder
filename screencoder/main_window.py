@@ -10,6 +10,7 @@ import json
 import os
 import re
 import shutil
+import time
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -19,8 +20,8 @@ from PySide6.QtCore import QElapsedTimer, Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QCursor, QDesktopServices, QGuiApplication, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QFileDialog, QFrame, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
-    QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton, QSizePolicy, QSplitter, QTabWidget, QTextBrowser,
-    QToolButton, QVBoxLayout, QWidget,
+    QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton, QSizePolicy, QSplitter, QStackedWidget, QTabWidget,
+    QTextBrowser, QToolButton, QVBoxLayout, QWidget,
 )
 
 from . import attachments as atts
@@ -32,10 +33,11 @@ from .api_agent import ApiAgentSession
 from . import llm
 from .code_view import CodeView
 from .config import (
-    APP_NAME, HOME_DIR, LANG_OTHER, MODES, PLACES, Settings, can_run_commands, can_skip_thinking, mode_of,
-    resolve_claude_cli, supports_effort,
+    APP_NAME, HOME_DIR, LANG_OTHER, MODE_AUTO, MODE_VIBE, MODES, PLACES, Settings, can_run_commands,
+    can_skip_thinking, mode_of, resolve_claude_cli, supports_effort,
 )
 from .copy_marks import Corpus, find_marks
+from .diagram_view import DiagramPanel, MermaidRenderer
 from .file_tree import LEGEND_HTML, MODIFIED, NEW, ORIGINAL, FileTree
 from .hotkeys import DEFAULT_HOTKEYS, GlobalHotkeys
 from .listener import DEFAULT_SPEECH_MODEL, SPEECH_MODELS, SystemAudioListener
@@ -80,9 +82,16 @@ PHASE_WORDS = {
     Phase.CODING: "you are writing the solution",
     Phase.DONE: "you have finished the solution",
 }
-# Pair Programming and Code Review: the developer's words during a piece of work go to the chat, as he talks it
-# through, and he then waits for the next request.
-TALKING = ("pair", "review")
+# The same in a System Design session, where there is no code to write.
+DESIGN_PHASE_WORDS = {
+    Phase.WARMING: "you are taking in the design task and have not started on it yet",
+    Phase.CODING: "you are in the middle of a step of the design - working it out, drawing it and talking it through",
+    Phase.LISTENING: "you have finished your last step of the design and are waiting for the person's reaction or "
+                     "their next question",
+}
+# Pair Programming, Code Review and System Design: the developer's words during a piece of work go to the chat,
+# as he talks it through, and he then waits for the next request (or, designing, takes his next step).
+TALKING = ("pair", "review", "design")
 MODE_HINTS = {
     "pair": "Pair Programming: add the code as screenshots or files, and/or put the project folder in Workspace "
             "(optional - he works on a copy of it). After Start he reads it in; then each request from the chat is "
@@ -90,6 +99,11 @@ MODE_HINTS = {
     "review": "Code Review: add the code, PR or diff as screenshots or files, and/or put the folder in Workspace "
               "(optional - he works on a copy of it). After Start he reads it and writes his findings; then he "
               "discusses them, and fixes what he is asked to.",
+    "design": "System Design: add the design question - or the diagram or architecture to discuss - as text, "
+              "screenshots or files (Workspace is not used). For a system to design he leads: requirements, "
+              "estimates, API and data model, the architecture, deep dives - one step per ▶ Next. For a design "
+              "to discuss he only answers what he is asked. Diagrams are on the Diagram tab, his notes on "
+              "Design notes.",
     "vibe": "Vibe-Coding: the developer writes no code. He asks his questions, plans, writes the prompts for your own "
             "coding agent and reviews what it produces. Put that agent's folder in Workspace (toolbar) so he can read "
             "its files.",
@@ -126,10 +140,37 @@ COPY_EFFORT = "medium"
 STANDBY_MAX_AGE_MS = 10_000
 WARM_EVERY_MS = 50 * 60_000  # the CLI caches for an hour: the quick-answer cache is warmed at most this often
 EFFORT_RE = re.compile(r"effort\s*[:=]?\s*\**\s*(low|medium|high|xhigh|max)\b", re.I)
-KIND_RE = re.compile(r"kind\s*[:=]?\s*\**\s*(code|answer)\b", re.I)  # prompts.KIND_SCALE
-# Code Review: the line on which he notes which findings a fix dealt with (prompts.FIXED_RULE) - read, never shown.
+# prompts.KIND_SCALE (DSA), prompts.DESIGN_KIND_SCALE (System Design) and prompts.AUTO_KIND_SCALE (Auto: all)
+KIND_RE = re.compile(r"kind\s*[:=]?\s*\**\s*(code|answer|pair|review|draw|discuss)\b", re.I)
+KINDS = {"dsa": ("code", "answer"), "design": ("draw", "discuss"), "pair": ("pair",), "review": ("review",),
+         "auto": ("code", "answer", "pair", "review", "draw", "discuss")}
+KIND_MODE = {"code": "dsa", "answer": "dsa", "pair": "pair", "review": "review", "draw": "design",
+             "discuss": "design"}  # what kind of session each kind of task is worked on as
+KIND_NAMES = {"code": "DSA - code", "answer": "DSA - answer", "pair": "Pair Programming", "review": "Code Review",
+              "draw": "System Design - he leads", "discuss": "System Design - discussed"}  # the override box
+# A further task's warm-up also says which earlier task it continues, and every one names itself (warmup_prompt).
+FOLLOWS_RE = re.compile(r"follows\s*[:=]?\s*\**\s*(?:task\s*)?(\d+|none)\b", re.I)
+MINUTES_RE = re.compile(r"minutes\s*[:=]?\s*\**\s*(\d{1,3})\b", re.I)  # the time a task has (warmup_prompt)
+TITLE_RE = re.compile(r"title\s*[:=]\s*\**\s*([^`\n]+?)\s*\**`?\s*$", re.I | re.M)
+# Lines that are read, never shown: in Code Review which findings a fix dealt with (prompts.FIXED_RULE), in
+# System Design the step he takes next (prompts.NEXT_RULE).
 FIXED_RE = re.compile(r"`?\[fixed:\s*([\d,\s]*)\]`?", re.I)
-FIXED_TAIL = re.compile(r"\s*`?\[(f(i(x(e(d(:[^\]]*)?)?)?)?)?)?\]?`?\s*$", re.I)  # that line, also still coming in
+NEXT_RE = re.compile(r"`?\[next:\s*([^\]\n]*)\]`?", re.I)
+MORE_RE = re.compile(r"`?\[more:\s*([^\]\n]*)\]`?", re.I)  # ...and the part he draws next (prompts.TALK_AND_DRAW)
+# ...and any of them while it is still coming in, at the end of what is written so far.
+MARK_TAIL = re.compile(r"\s*`?\[(f(i(x(e(d(:[^\]]*)?)?)?)?)?|n(e(x(t(:[^\]]*)?)?)?)?|m(o(r(e(:[^\]]*)?)?)?)?)?\]?`?\s*$",
+                       re.I)
+
+
+def conversation_of(session) -> str:
+    """The conversation a copy of the agent goes on from: its own - or, in the moment after the agent moved on
+    to a task's folder as a copy of itself and before that copy has an id, the one it was made from."""
+    return getattr(session, "session_id", "") or getattr(session, "moved_from", "")
+
+
+def strip_marks(text: str) -> str:
+    """What he says, without the lines that are for the app only."""
+    return MARK_TAIL.sub("", MORE_RE.sub("", NEXT_RE.sub("", FIXED_RE.sub("", text))))
 MIN_WINDOW_WIDTH = 806  # two thirds of the 1209 px the layout used to need at minimum
 EXPLORER_CHARS = 20  # how long a file name fits in the explorer at its first width
 EXPLORER_CHROME = 60  # px the file tree needs besides the name: indentation, icon, status column, frame
@@ -183,6 +224,10 @@ coding agent: what he says is in the panel on the left, and the prompts he write
 with the parts you can copy from the agent's files marked. Put the agent's folder in **Workspace** so he can \
 read its files; you pass the prompts on and run things for him.
 
+**Mode: System Design** - no code: he designs a system with you, leading it step by step (**▶ Next**), or \
+discusses a design you show him. His diagrams are drawn in Mermaid on the **Diagram** tab, his notes are on \
+**Design notes**.
+
 Global hotkeys (work while your IDE has focus): **Ctrl+Alt+Shift+S** snip a region, **Ctrl+Alt+Shift+F** whole screen."""
 
 
@@ -199,9 +244,35 @@ class Run:
     place: str = ""  # where the code is for the person he talks to (config.PLACES, prompts.place_note)
     plan: str = ""
     effort: str = "high"  # how hard solving it is, as the agent judged when it took the task in (warm-up)
-    kind: str = "code"  # DSA: "code" - or "answer" when it wants an answer and no code (prompts.KIND_SCALE)
+    # DSA: "code" - or "answer" when it wants an answer and no code (prompts.KIND_SCALE). System Design: "draw"
+    # (a system to design, he leads) or "discuss" (a design that is shown, he answers) - prompts.DESIGN_KIND_SCALE.
+    kind: str = "code"
     findings: list[str] = field(default_factory=list)  # Code Review: the numbered findings of the latest review
     fixed: set[int] = field(default_factory=set)  # ...and the numbers of those he has fixed since (FIXED_RE)
+    # A session holds one task after another (＋ Next task), all with the same agent, which goes on from one to
+    # the next: this is task `number` of it. Each has its own folder (`workspace`) - or, when it continues an
+    # earlier one (`follows`), that one's - and its own views (Notes, Diagram, Design notes).
+    number: int = 1
+    title: str = ""  # how it names itself (the warm-up's "title:")
+    root: Path | None = None  # the session's folder: every task's run folder and workspace is in it
+    follows: int = 0  # the earlier task it continues (0: none)
+    # The time it has, as said or shown (judged at the read-in, prompts.time_note), and when it started: a design
+    # is measured by the time, not by how much is drawn.
+    minutes: int = 0
+    started: float = field(default_factory=time.time)
+    intro: str = ""  # said with its first piece of work (prompts.task_note, kind_correction) - then sent
+    move: tuple | None = None  # (working directory, system prompt) the agent moves to before that work
+    snapshot: Path | None = None  # its folder as it ended, when a later task goes on working in that folder
+    views: tuple = ()  # (plan view, diagram panel, design notes view) - see _new_task_views
+    # While the work is on another task (it can go back and forth: _resume_task): where it stood, and the work
+    # requests kept for it.
+    left_phase: object = None
+    kept: list = field(default_factory=list)
+    next_step: str = ""  # System Design, leading: the step he said he takes next (NEXT_RE); "" = the first one
+    steps: int = 0  # ...and how many he has taken
+    more: str = ""  # System Design: drawing part by part, the part he draws next once told to go on (MORE_RE)
+    drawn: bool = False  # a diagram has been drawn (the first one brings the Diagram tab up)
+    diagram_fixes: int = 0  # diagrams that could not be drawn, sent back to him in a row (_fix_diagrams)
     activity: list[str] = field(default_factory=list)  # plain log handed to the quick-answer model
     touched: list[str] = field(default_factory=list)  # files the agent wrote or edited
     side_seen: int = 0
@@ -259,13 +330,14 @@ class CopyJob:
     writes is shown on the first tab and merged back into the session (Run.answered)."""
     kind: str  # a key of prompts.COPY_JOBS
     session: ClaudeSession
+    view: object = None  # the first tab of the task it was asked for (it writes there even after a next task)
     text: str = ""
     shown: int = 0  # how much of `text` is on the first tab already
     done: bool = False  # it has finished writing (or failed)
     closed: bool = False  # and all of it is on the first tab
 
 
-REPLY_MARKS = (prompts.SKIP_MARK, prompts.AGENT_MARK)
+REPLY_MARKS = (prompts.SKIP_MARK, prompts.AGENT_MARK, prompts.NEW_TASK_MARK)
 
 
 def reply_mark(text: str) -> str | None:
@@ -278,17 +350,19 @@ def is_skip(text: str) -> bool:
     return reply_mark(text) == prompts.SKIP_MARK
 
 
-def held_line(text: str) -> tuple[str, bool]:
-    """What the quick model says right away while it passes a message on: the words after its "[agent]".
+def held_line(text: str, mark: str = prompts.AGENT_MARK) -> tuple[str, bool]:
+    """What the quick model says right away while it passes a message on: the words after its "[agent]" (or,
+    `mark` NEW_TASK_MARK, after its "[new task]").
 
     Returns (those words, whether they are finished). They are meant to be two short sentences and nothing
     more: as soon as a new paragraph or a third sentence follows, or it gets too long, the rest is not wanted -
     the plan, the answer and the prompts are the working session's job.
     """
-    at = text.lower().find(prompts.AGENT_MARK)
+    at = text.lower().find(mark)
     if at < 0:
         return "", False
-    rest = HELD_EFFORT.sub("", text[at + len(prompts.AGENT_MARK):], count=1)  # "[high]": see held_effort
+    rest = HELD_EFFORT.sub("", text[at + len(mark):], count=1)  # "[high]": see held_effort
+    rest = HELD_TASK.sub("", rest, count=1)  # "[task 1]": see held_task
     if rest.lstrip(" \t`*_").startswith("[") and "]" not in rest:
         return "", False  # that mark is still coming in
     rest = rest.replace("\r", "").lstrip(" \t\n`*_-–—:")
@@ -304,6 +378,18 @@ def held_line(text: str) -> tuple[str, bool]:
 
 
 HELD_EFFORT = re.compile(r"^[\s`*_]*\[(low|medium|high|xhigh|max)\]", re.I)
+HELD_TASK = re.compile(r"^[\s`*_]*\[task\s*(\d+)\]", re.I)  # prompts.tasks_note
+
+
+def held_task(text: str) -> int:
+    """The earlier task of the session a work request is for: the "[task 1]" after the quick model's "[agent]"
+    and its effort (prompts.tasks_note), or 0 for the task being worked on."""
+    at = text.lower().find(prompts.AGENT_MARK)
+    if at < 0:
+        return 0
+    rest = HELD_EFFORT.sub("", text[at + len(prompts.AGENT_MARK):], count=1)
+    match = HELD_TASK.match(rest)
+    return int(match.group(1)) if match else 0
 
 
 def held_effort(text: str) -> str:
@@ -551,7 +637,16 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.app = app
         self.settings = Settings.load()
-        self.run: Run | None = None
+        self.run: Run | None = None  # the task being worked on: the session's latest
+        self.tasks: list[Run] = []  # every task of the session, oldest first (＋ Next task adds one)
+        self._viewed: Run | None = None  # the task the tabs show (the task picker); None: the current one
+        self._next_open = False  # the task box is open for the session's next task (＋ Next task)
+        self._pending_next: tuple | None = None  # a next task waiting for the agent to stop its current step
+        self._pending_kind = ""  # a kind of task picked in the override box, waiting for that too
+        self._pending_switch: tuple | None = None  # (earlier task, then) - back to it once the agent is free
+        # Which task instructions the agent's conversation follows (_note_key): they are said again in the
+        # conversation when a task needs others - a fork does not take up new system instructions (measured).
+        self._in_force = ""
         self.main: ClaudeSession | None = None
         self.side: ClaudeSession | None = None
         self.phase = Phase.IDLE
@@ -559,6 +654,9 @@ class MainWindow(QMainWindow):
         self._live_view: LiveMarkdownView | None = None
         self._turn_text = ""  # text streamed during the current analysis turn (= the plan)
         self._tool_names: dict[str, str] = {}
+        self._tool_paths: dict[str, str] = {}  # tool call id -> the file it writes (System Design: the whiteboard)
+        self._turn_no = 0  # turns of the working session that have ended
+        self._board_turn = -1  # System Design: the turn he last drew in (what was new before it is not any more)
         self._interrupt_requested = False
         self._syntax_rounds = 0  # automatic "your code does not parse" round trips in the current task
         self._side_cost_done = 0.0
@@ -637,6 +735,7 @@ class MainWindow(QMainWindow):
         self._render_transcript()
         if self.settings.listen_audio and audio_supported():
             QTimer.singleShot(300, lambda: self.listen_btn.setChecked(True))
+        QTimer.singleShot(150, self._size_transcript)
         # Start the quick-answer CLI in the background so the first Ask doesn't pay its startup time.
         QTimer.singleShot(1500, lambda: self.side is None and resolve_claude_cli(self.settings) and self._ensure_side())
 
@@ -656,10 +755,17 @@ class MainWindow(QMainWindow):
         tb.setMovable(False)
         # Which of these (and of all the other buttons) can be used at a given moment: see _update_buttons.
         self.new_task_action = self._action(
-            "＋ New task", self._new_task,
-            "Start over for another problem: after you confirm, the current task is stopped and "
-            "the plan, prompts, activity, files, Q&A panel and workspace path are cleared")
+            "⟲ New session", self._new_task,
+            "Start over from scratch: after you confirm, the session is stopped and its tasks, plan, prompts, "
+            "activity, files, Q&A panel and workspace path are cleared")
         tb.addAction(self.new_task_action)
+        # The next task of the same session: the same agent goes on to it, knowing all that came before.
+        self.next_task_action = self._action(
+            "＋ Next task", self._open_next_task,
+            "Move on to another task in this session - the same agent, which knows everything so far. Add the next "
+            "task (text, screenshots, files) and start it; earlier tasks stay in the Task box above the tabs. A "
+            "task that continues an earlier one is worked on in that one's folder.")
+        tb.addAction(self.next_task_action)
         tb.addSeparator()
         tb.addWidget(QLabel(" Workspace: "))
         self.ws_edit = QLineEdit(self.settings.workspace)
@@ -704,9 +810,13 @@ class MainWindow(QMainWindow):
         self.mode_combo.setCurrentText(self.settings.mode)
         self.mode_combo.setToolTip("The kind of session. The code is always in the language the problem or the code "
                                    "at hand is in.\n"
+                                   "\"Auto\": he judges which of the next four the task is, from what was said and "
+                                   "shown - the box beside the work buttons shows it, and changes it.\n"
                                    "\"DSA\": a self-contained problem - an algorithm, a SQL query, a function to fix.\n"
                                    "\"Pair Programming\": an existing codebase, changed request by request.\n"
                                    "\"Code Review\": he reviews given code - findings first, then fixes on request.\n"
+                                   "\"System Design\": no code - he designs a system (leading it step by step) or "
+                                   "discusses a design that is shown, with Mermaid diagrams.\n"
                                    "\"Vibe-Coding\": the developer writes no code - he plans, writes the prompts "
                                    "for your own coding agent and reviews what it produces.")
         self.place_combo = QComboBox()
@@ -724,12 +834,19 @@ class MainWindow(QMainWindow):
         self.start_btn.setToolTip("Ctrl+Enter. The agent takes the task in, with everything said in the chat so far, "
                                   "and waits: then ask it for its understanding, how to solve it, or the solution.")
         self.start_btn.clicked.connect(self.start_task)
+        self._start_tip = self.start_btn.toolTip()  # ＋ Next task words it for the next task (_open_next_task)
+        self.cancel_next_btn = QPushButton("Cancel")  # only while the box is open for a next task
+        self.cancel_next_btn.setToolTip("Close this box and stay on the current task")
+        self.cancel_next_btn.clicked.connect(self._cancel_next_task)
+        self.cancel_next_btn.hide()
         row = FlowLayout(spacing=8)  # wraps when the code side is narrow
         row.addWidget(QLabel("Mode:"))
         row.addWidget(self.mode_combo)
-        row.addWidget(QLabel("Code in:"))
+        self.place_label = QLabel("Code in:")  # no code in System Design: hidden there (_mode_changed)
+        row.addWidget(self.place_label)
         row.addWidget(self.place_combo)
         row.addWidget(self.start_btn)
+        row.addWidget(self.cancel_next_btn)
         self.mode_hint = QLabel()  # what the chosen kind of session means (_mode_changed)
         self.mode_hint.setWordWrap(True)
         self.mode_hint.setStyleSheet("color:#e3b341; font-size:11px;")
@@ -756,14 +873,18 @@ class MainWindow(QMainWindow):
         self.mode_combo.currentTextChanged.connect(self._mode_changed)
         self._mode_changed(self.mode_combo.currentText())
 
-        self.plan_view = LiveMarkdownView()
+        # Every task of a session has a first tab, a Diagram and Design notes of its own (_new_task_views): these
+        # stacks show those of the task picked above the tabs.
+        self.plan_stack, self.diagram_stack, self.notes_stack = QStackedWidget(), QStackedWidget(), QStackedWidget()
+        self.mermaid = MermaidRenderer(self)  # one offscreen page draws every task's diagrams
+        self._new_task_views()
         self.plan_view.append_markdown(INTRO_PLAN, spaced=True)
         # A coding task, once the agent has taken it in: its understanding and how it would solve it come from
         # copies of it (so they can be asked for while it works), the solution from the agent itself.
         self.understand_btn = QPushButton("💡 Get Understanding")
         self.understand_btn.setToolTip("Its understanding of the task, from a copy of the agent at medium effort - "
                                        "the agent itself is not disturbed, and is told what the copy said.")
-        self.understand_btn.clicked.connect(lambda: self._get_copy_job("understanding"))
+        self.understand_btn.clicked.connect(lambda: self._get_copy_job(self._understanding_kind()))
         self.approach_btn = QPushButton("🧭 Get How to solve")
         self.approach_btn.setToolTip("How it would solve the task, from a copy of the agent at medium effort - the "
                                      "agent itself is not disturbed, and is told what the copy said.")
@@ -799,6 +920,19 @@ class MainWindow(QMainWindow):
         self.fix_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.fix_menu = QMenu(self.fix_btn)
         self.fix_btn.setMenu(self.fix_menu)
+        # System Design, a system to design: he leads, and each step names the one after it (this button's text).
+        self.next_btn = QPushButton("▶ Next step")
+        self.next_btn.setObjectName("primary")
+        self.next_btn.setToolTip("He takes the next step of the design himself - the one he named at the end of the "
+                                 "last one - and says it as his own move.\nA step asked for in the chat (\"let's go "
+                                 "deeper into the cache\") goes to him through Ask instead.")
+        self.next_btn.clicked.connect(lambda: self._design_step())
+        # ...a design to discuss: he answers only what he is asked; this just draws what was shown, silently.
+        self.draw_btn = QPushButton("🗺 Draw it")
+        self.draw_btn.setToolTip("He draws the design that was shown as a Mermaid diagram (Diagram tab) and puts it "
+                                 "in his notes, without a word - for you to look at, and as the base for changes "
+                                 "he is asked for.")
+        self.draw_btn.clicked.connect(self._draw_existing)
         self.work_label = QLabel()
         self.work_label.setWordWrap(True)
         self.work_label.setStyleSheet("color:#9aa4b2;")
@@ -810,10 +944,20 @@ class MainWindow(QMainWindow):
             "dsa": (self.understand_btn, self.approach_btn, self.solve_btn),
             "pair": (self.explain_btn, self.howto_btn, self.tests_btn),
             "review": (self.understand_btn, self.review_btn, self.fix_btn),
+            "design": (self.understand_btn, self.next_btn, self.draw_btn),  # Next or Draw it, by kind: _apply_mode
         }
         for button in (self.understand_btn, self.approach_btn, self.solve_btn, self.explain_btn, self.howto_btn,
-                       self.tests_btn, self.review_btn, self.fix_btn):
+                       self.tests_btn, self.review_btn, self.fix_btn, self.next_btn, self.draw_btn):
             bar.addWidget(button)
+        # What kind of task he judged it to be - and the way to correct him (_kind_picked).
+        self.kind_combo = QComboBox()
+        for kind, name in KIND_NAMES.items():
+            self.kind_combo.addItem(name, kind)
+        self.kind_combo.setToolTip("What kind of task he judged this to be. Pick another and he works on it as that "
+                                   "(what he is doing now is stopped first).")
+        self.kind_combo.activated.connect(self._kind_picked)  # the user's picks only, not the app's
+        self.kind_combo.hide()
+        bar.addWidget(self.kind_combo)
         bar.addWidget(self.work_label)
         # Language "Non-coding": the user carries things between the developer and an external coding agent.
         # Here they show him how that agent is doing: screenshots of its latest activity (its chat, its action
@@ -848,8 +992,9 @@ class MainWindow(QMainWindow):
         self.plan_tab = plan_tab
         plan_layout = QVBoxLayout(plan_tab)
         plan_layout.setContentsMargins(0, 0, 0, 0)
-        plan_layout.addWidget(self.plan_view, 1)
-        plan_layout.addWidget(self.work_bar)
+        plan_layout.addWidget(self.plan_stack, 1)
+        plan_layout.addWidget(self.work_bar)  # in System Design under the tabs instead (_apply_mode)
+        self.plan_layout = plan_layout
         # Language "Non-coding": the prompts the developer writes for the external agent - to read and type off.
         self.prompts_view = PromptsView()
         self.prompts_view.sent.connect(self._prompt_sent)
@@ -917,11 +1062,15 @@ class MainWindow(QMainWindow):
         files_tab.setStretchFactor(1, 1)
         files_tab.setSizes([self.file_tree.fontMetrics().averageCharWidth() * EXPLORER_CHARS + EXPLORER_CHROME, 840])
 
-        self.tabs = QTabWidget()  # names, and whether the Prompts tab is there at all: see _apply_mode
+        self.tabs = QTabWidget()  # names, and which tabs are there at all: see _apply_mode
         self.tabs.addTab(plan_tab, "Understanding && plan")
+        self.tabs.addTab(self.diagram_stack, "Diagram")
+        self.tabs.addTab(self.notes_stack, "Design notes")
         self.tabs.addTab(self.prompts_view, "Prompts")
         self.tabs.addTab(self.activity_view, "Coding activity")
         self.tabs.addTab(files_tab, "Output Code")
+        self.files_tab = files_tab
+        self.tabs.currentChanged.connect(self._tab_seen)
         # At the end of the tab row, and on the remote page beside the last tab: when on, the open tab stays in step
         # with everyone viewing from the web (and their tab clicks move it here); when off, each side browses the
         # tabs on its own. Either side can switch it, and it is one box: the two always show the same.
@@ -933,8 +1082,25 @@ class MainWindow(QMainWindow):
         code_layout = QVBoxLayout(code_side)
         code_layout.setContentsMargins(0, 0, 0, 0)
         code_layout.setSpacing(4)
+        # The session's tasks, to look at any of them again: the tabs show the one picked here; the work goes
+        # on in the latest. Shown once there is more than one.
+        self.task_picker = QComboBox()
+        self.task_picker.setToolTip("Which task of this session the tabs show - its notes, diagram and code as it "
+                                    "ended. The work buttons and the chat are always for the latest task.")
+        self.task_picker.currentIndexChanged.connect(self._view_task)
+        self.task_row = QWidget()
+        task_row = QHBoxLayout(self.task_row)
+        task_row.setContentsMargins(0, 0, 0, 0)
+        task_row.addWidget(QLabel("Task:"))
+        task_row.addWidget(self.task_picker, 1)
+        self.viewing_label = QLabel()  # "an earlier task - as it ended"
+        self.viewing_label.setStyleSheet("color:#e3b341; font-size:11px;")
+        task_row.addWidget(self.viewing_label)
+        self.task_row.hide()
+        code_layout.addWidget(self.task_row)
         code_layout.addWidget(self.tabs, 1)
         code_layout.addWidget(self.lead_bar)
+        self.code_layout = code_layout
 
         left = QSplitter(Qt.Orientation.Vertical)
         left.addWidget(task_box)
@@ -946,7 +1112,7 @@ class MainWindow(QMainWindow):
         self.side_label.setStyleSheet("color:#9aa4b2;")
         self.side_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)  # never forces width
         self.chat = ChatView()  # answers as chat bubbles, newest at the top
-        for view in (self.chat, self.plan_view, self.code_view):
+        for view in (self.chat, self.code_view):  # each task's views: _new_task_views
             view.setProperty("remote_watched", True)  # the remote page marks the part of it on screen here
         # No typed question: the question is what was heard (transcript); this only collects attachments.
         self.ask = Composer("Question", "", text_input=False)
@@ -1024,6 +1190,7 @@ class MainWindow(QMainWindow):
         right_split.addWidget(question_box)
         right_split.addWidget(self.chat)
         right_split.setSizes([360, 520])
+        self.right_split = right_split  # the transcript gets half its height once the window is up (_size_transcript)
         right_layout.addWidget(right_split, 1)
         right_layout.addWidget(self.msg)  # hidden here; placeholder for the remote page's private message box
 
@@ -1078,6 +1245,14 @@ class MainWindow(QMainWindow):
             "(**✋ Interrupt & send** stops its current step first)."
         )
 
+    def _size_transcript(self) -> None:
+        """The transcript box at half the height the layout gives it by itself (the user's ask): the other half
+        goes to the chat under it. Done once the window has its size, so it holds at any window size."""
+        split, give = self.right_split, self.tx_view.height() // 2
+        sizes = split.sizes()
+        if len(sizes) == 2 and give > 0 and sizes[0] > give:
+            split.setSizes([sizes[0] - give, sizes[1] + give])
+
     def _apply_settings(self) -> None:
         s = self.settings
         effort = f" · {s.coding_effort}" if supports_effort(s.coding_model) else ""
@@ -1088,7 +1263,9 @@ class MainWindow(QMainWindow):
         self._apply_mode()
         # Reading text (plan, activity, transcript, chat) at the chosen size; buttons and menus stay normal.
         scale = min(4.0, max(0.75, s.reading_scale))
-        self.plan_view.set_text_scale(scale)
+        for stack in (self.plan_stack, self.notes_stack):  # every task's first tab and notes
+            for i in range(stack.count()):
+                stack.widget(i).set_text_scale(scale)
         self.prompts_view.set_text_scale(scale)
         self.activity_view.set_text_scale(scale)
         self.chat.set_text_scale(scale)
@@ -1129,11 +1306,13 @@ class MainWindow(QMainWindow):
         return self.status if self._directing() else self.ask
 
     def _new_task(self) -> None:
-        """Start over for the next problem - after a confirmation, since everything on screen is cleared."""
+        """Start over from scratch - after a confirmation, since everything on screen is cleared. (The next
+        task of the same session is ＋ Next task.)"""
         running = self.main is not None and self.main.running and self.phase in ACTIVE
-        question = ("Start a new task?\n\nThis clears the plan, the prompts, the activity log, the files view and the "
-                    "Q&A panel (transcript, attachments and chat), and empties the workspace path.\n"
-                    "Nothing on disk is deleted.")
+        question = ("Start a new session?\n\nThis ends the agent and clears every task of this session: the plan, "
+                    "the prompts, the activity log, the files view and the Q&A panel (transcript, attachments and "
+                    "chat), and empties the workspace path.\nNothing on disk is deleted.\n\n"
+                    "To go on to another task with the same agent, use ＋ Next task instead.")
         if running:
             question += "\n\nThe current task is still running and will be stopped."
         if QMessageBox.question(self, APP_NAME, question) != QMessageBox.StandardButton.Yes:
@@ -1159,9 +1338,11 @@ class MainWindow(QMainWindow):
         self._asked.clear()
         self._show_asked()
         self._reading_clock = None
-        # The code side: plan, prompts, activity, files
-        self.plan_view.wrap_code = False
-        self.plan_view.reset()
+        # The code side: plan, prompts, activity, files - and the session's tasks
+        self.tasks, self._viewed = [], None
+        self._pending_next, self._pending_kind, self._in_force, self._pending_switch = None, "", "", None
+        self._close_next_box()
+        self._reset_task_views()
         self.plan_view.append_markdown(INTRO_PLAN, spaced=True)
         self.prompts_view.reset()
         self.tabs.setTabText(self.tabs.indexOf(self.prompts_view), "Prompts")
@@ -1204,9 +1385,15 @@ class MainWindow(QMainWindow):
         self.mode_hint.setText(MODE_HINTS.get(mode, ""))
         self.mode_hint.setVisible(mode in MODE_HINTS)
         self.ws_edit.setPlaceholderText({"vibe": "(the folder your coding agent works in)",
+                                         "auto": "(optional: your project folder - he works on a copy of it)",
                                          "pair": "(optional: the project folder - he works on a copy of it)",
-                                         "review": "(optional: the code's folder - he works on a copy of it)"}
+                                         "review": "(optional: the code's folder - he works on a copy of it)",
+                                         "design": "(not used in System Design)"}
                                         .get(mode, "(a new empty folder for each task)"))
+        # No code in a design session: nowhere for it to be.
+        self.place_label.setVisible(mode != "design")
+        self.place_combo.setVisible(mode != "design")
+        self._update_buttons()
 
     def _directing(self) -> bool:
         """Is the current task one where the developer directs an external coding agent?"""
@@ -1220,17 +1407,47 @@ class MainWindow(QMainWindow):
     def _apply_mode(self) -> None:
         """Name the tabs and buttons for what the developer does in this task: code, or direct a coding agent."""
         directing = self._directing()
-        mode = self.run.mode if self.run else "dsa"
+        mode = self.run.mode if self.run else "dsa"  # the work buttons are for the latest task...
+        viewed = self._viewed_run()
+        shown_mode = viewed.mode if viewed else "dsa"  # ...the tabs are those of the task picked above them
         tab = self.tabs.indexOf
         # Directing: the first tab holds only his understanding and his questions; what he says after that is
         # in the chat, and what he writes for the agent on the Prompts tab.
         self.tabs.setTabText(tab(self.plan_tab), {"vibe": "Understanding && questions", "pair": "Notes",
-                                                  "review": "Review"}.get(mode, "Understanding && plan"))
-        shown = self.mode_buttons.get(mode, ())
+                                                  "review": "Review", "design": "Notes"}
+                             .get(shown_mode, "Understanding && plan"))
+        shown = set(self.mode_buttons.get(mode, ()))
+        if mode == "design":
+            # Leading a design: ▶ Next. Discussing one: Draw it. Neither until he has said which it is.
+            kind = self.run.kind if self.run and self.phase != Phase.WARMING else ""
+            shown -= {self.next_btn} if kind != "draw" else set()
+            shown -= {self.draw_btn} if kind != "discuss" else set()
+            if self.run is not None and self.run.more:
+                shown.add(self.next_btn)  # drawing part by part: ▶ Go on, in either kind
         for button in {b for buttons in self.mode_buttons.values() for b in buttons}:
             button.setVisible(button in shown)
-        self.tabs.setTabText(tab(self.activity_view), "Activity" if directing else "Coding activity")
+        # What kind of task he judged it to be, once he has: shown, and there to correct him.
+        judged = self.run is not None and not directing and mode in KIND_MODE.values() and self.phase != Phase.WARMING
+        self.kind_combo.setVisible(judged)
+        if judged:
+            self.kind_combo.setCurrentIndex(max(0, self.kind_combo.findData(self.run.kind)))
+        design = mode == "design"
+        designed = shown_mode == "design"
+        self.tabs.setTabText(tab(self.activity_view), "Activity" if directing or design else "Coding activity")
         self.tabs.setTabVisible(tab(self.prompts_view), directing)
+        self.tabs.setTabVisible(tab(self.diagram_stack), designed)
+        self.tabs.setTabVisible(tab(self.notes_stack), designed)
+        if not designed:
+            self.tabs.setTabText(tab(self.diagram_stack), "Diagram")  # without the dot of a change not seen yet
+            self.tabs.setTabText(tab(self.notes_stack), "Design notes")
+        self.tabs.setTabVisible(tab(self.files_tab), not designed)
+        # Designing, the work buttons (▶ Next) sit under the tabs: he is mostly followed on the Diagram tab.
+        layout = self.code_layout if design else self.plan_layout
+        if layout.indexOf(self.work_bar) < 0:
+            if design:
+                layout.insertWidget(layout.indexOf(self.lead_bar), self.work_bar)
+            else:
+                layout.addWidget(self.work_bar)
         self.right_panel.setTitle("Supervisor - questions && answers" if directing else "Ask while it codes")
         self.send_btn.setText("↪ Send to developer" if directing else "↪ Send to agent")
         self.send_btn.setToolTip(
@@ -1279,16 +1496,22 @@ class MainWindow(QMainWindow):
         typed_folder = self.ws_edit.text().strip()
         # Toolbar
         self.new_task_action.setEnabled(run is not None or bool(self._tx) or bool(self.chat.bubbles()))
-        self.ws_edit.setEnabled(setup)  # the folder is fixed once a task has started
-        self.browse_action.setEnabled(setup)
+        # Another task with the same agent: once this one has been read in (Vibe-Coding is a session of its own).
+        self.next_task_action.setEnabled(alive and run is not None and not run.directing and not self._next_open
+                                         and self._pending_next is None and self.phase != Phase.WARMING)
+        self.kind_combo.setEnabled(alive and not self._pending_kind)
+        designing = mode_of(self.mode_combo.currentText()) == "design"  # no folder in a design session
+        first = setup and not self._next_open  # the folder is fixed for the session once its first task started
+        self.ws_edit.setEnabled(first and not designing)
+        self.browse_action.setEnabled(first and not designing)
         self.open_action.setEnabled(run is not None or (bool(typed_folder) and Path(typed_folder).expanduser().is_dir()))
         # Starting a task, and the plan review
-        self.start_btn.setEnabled(setup and (not self.task.is_empty() or bool(self._asked)))
+        self.start_btn.setEnabled(setup and (not self.task.is_empty() or bool(self._asked) and not self._next_open))
         # A coding task's agent, once it has taken the task in
         read_in = alive and run is not None and not run.directing and self.phase not in (Phase.WARMING, Phase.IDLE)
         running = {job.kind for job in self._jobs if not job.done}
         by_copy = isinstance(self.main, ClaudeSession)  # otherwise the session itself writes them, when free
-        for kind, button in (("understanding", self.understand_btn), ("approach", self.approach_btn),
+        for kind, button in ((self._understanding_kind(), self.understand_btn), ("approach", self.approach_btn),
                              ("explain", self.explain_btn), ("howto", self.howto_btn)):
             button.setEnabled(read_in and kind not in running and self._plan_reply != kind
                               and (by_copy or not self.main.busy))
@@ -1298,6 +1521,18 @@ class MainWindow(QMainWindow):
         self.tests_btn.setEnabled(free)
         self.review_btn.setEnabled(free and self.phase == Phase.LISTENING)
         self.fix_btn.setEnabled(free and self.phase == Phase.LISTENING and bool(self._open_findings()))
+        step = run.next_step if run is not None else ""
+        complete = step.lower() == prompts.NEXT_DONE
+        if run is not None and run.more:  # partway through drawing: the next part waits for this click
+            self.next_btn.setText(f"▶ Go on: {shorten(run.more, 40)}")
+            self.next_btn.setToolTip("He has said and drawn one part and waits for you: click when you have it, and "
+                                     "he says and draws the next part.")
+        else:
+            self.next_btn.setText(f"▶ Next: {shorten(step, 40)}" if step and not complete else "▶ Next step")
+            self.next_btn.setToolTip("He takes the next step of the design himself - the one he named at the end of "
+                                     "the last one - and says it as his own move.")
+        self.next_btn.setEnabled(free and self.phase == Phase.LISTENING)
+        self.draw_btn.setEnabled(free and self.phase == Phase.LISTENING)
         # The question panel
         self.ask_btn.setEnabled(to_send)
         self.send_btn.setEnabled(alive and to_send)
@@ -1382,6 +1617,14 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------ main task
     def start_task(self) -> None:
+        if self._next_open and self.run is not None:
+            # The box was opened for the session's next task: the same agent goes on to it.
+            if self.task.is_empty():
+                self._notice("Add the next task - a description, screenshots or files - first.")
+                return
+            text, attachments = self.task.text(), self.task.attachments()
+            self._start_next_task(text, attachments, self.mode_combo.currentText(), self.place_combo.currentText())
+            return
         if self.task.is_empty() and not self._asked:
             self._notice("Add a description, screenshots or files first.")
             return
@@ -1404,7 +1647,8 @@ class MainWindow(QMainWindow):
         label = self.mode_combo.currentText()
         mode = mode_of(label)
         directing = mode == "vibe"  # the developer directs a coding agent outside this app
-        ws_text = self.ws_edit.text().strip()
+        typed_ws = self.ws_edit.text().strip()
+        ws_text = "" if mode == "design" else typed_ws  # a design session has no project folder: a fresh one
         if ws_text and not Path(ws_text).expanduser().is_dir():
             QMessageBox.warning(self, APP_NAME, f"The workspace folder does not exist:\n{ws_text}\n\n"
                                 + ("Pick the folder your coding agent works in, or leave Workspace empty." if directing
@@ -1460,7 +1704,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, APP_NAME, f"Could not prepare the run folder:\n{shorten(str(exc), 1200)}")
             return
 
-        self.settings.workspace = ws_text
+        self.settings.workspace = typed_ws
         self.settings.mode = label
         place = self.settings.code_place = self.place_combo.currentText()
         self.settings.save()
@@ -1469,7 +1713,8 @@ class MainWindow(QMainWindow):
         # Every mode works in the language of the problem or the code at hand (prompts.language_note).
         self.run = Run(run_id, run_dir, inputs, workspace, text or "\n\n".join(r.text for r in asked), inputs_md,
                        language=LANG_OTHER, mode=mode, place=place, directing=directing,
-                       shared=directing and bool(ws_text), given=given)
+                       shared=directing and bool(ws_text), given=given, kind=KINDS.get(mode, ("code",))[0],
+                       root=run_dir)
         workspace_empty = not any(workspace.iterdir())
         self._snapshot_existing()  # whatever is already in the workspace belongs to the problem
         if directing:
@@ -1490,8 +1735,17 @@ class MainWindow(QMainWindow):
         self._tool_names.clear()
         self._interrupt_requested = False
         self._syntax_rounds = 0
-        self.plan_view.reset()
+        # A new session: its first task, with views of its own.
+        self._close_next_box()
+        self._pending_next, self._pending_kind, self._pending_switch = None, "", None
+        self._reset_task_views()
+        self.run.views = (self.plan_view, self.diagram_panel, self.design_view)
+        self.tasks, self._viewed = [self.run], None
+        self._refresh_task_picker()
+        self.plan_view.wrap_code = directing
         self.activity_view.reset()
+        if mode == "design":
+            self.diagram_panel.warm()  # the page that draws the diagrams starts while he reads the task in
         self.file_tree.clear()
         self.code_view.set_code("")
         self.file_label.clear()
@@ -1522,7 +1776,7 @@ class MainWindow(QMainWindow):
         tools = "Read,Glob,Grep" if directing else None
         permission_mode = None if directing else s.permission_mode
         system = ((prompts.LEAD_SYSTEM if directing else prompts.MAIN_SYSTEM) + prompts.name_note(s.dev_name)
-                  + prompts.place_note(place))
+                  + self._system_note())
         if s.coding_provider == llm.CLAUDE_CODE:
             # A coding task's agent takes the task in at the level its copies work at, so that they share its
             # cache; each piece of work then runs at the level judged for it (_solve, _deliver_to_agent).
@@ -1534,7 +1788,8 @@ class MainWindow(QMainWindow):
                 effort=effort if supports_effort(s.coding_model) else None,
                 permission_mode=permission_mode,
                 tools=tools,
-                add_dirs=[inputs],
+                # The whole session's folder: the inputs of its later tasks, and its earlier tasks' folders.
+                add_dirs=[inputs] if directing else [run_dir],
                 append_system_prompt=system,
                 name=f"ScreenCoder {run_id}",
                 log_path=run_dir / "events.jsonl",
@@ -1549,7 +1804,7 @@ class MainWindow(QMainWindow):
                 cwd=workspace,
                 model=s.coding_model,
                 tools=tools,
-                add_dirs=[inputs],
+                add_dirs=[inputs] if directing else [run_dir],
                 append_system_prompt=system,
                 permission_mode=permission_mode,
                 can_run=(not directing) and can_run_commands(s.permission_mode),
@@ -1557,27 +1812,18 @@ class MainWindow(QMainWindow):
                 log_path=run_dir / "events.jsonl",
                 parent=self,
             )
-        self.main = session
-        g = lambda fn: self._guard(session, fn)  # noqa: E731
-        session.initialized.connect(g(self._main_init))
-        session.status_changed.connect(g(self._main_status_changed))
-        session.text_started.connect(g(self._main_text_started))
-        session.text_delta.connect(g(self._main_text_delta))
-        session.text_finished.connect(g(self._main_text_finished))
-        session.thinking_finished.connect(g(self._main_thinking))
-        session.tool_used.connect(g(self._main_tool))
-        session.tool_result.connect(g(self._main_tool_result))
-        session.permission_denied.connect(g(self._main_denied))
-        session.message_consumed.connect(g(self._main_message_consumed))
-        session.turn_finished.connect(g(self._main_turn))
-        session.process_finished.connect(g(self._main_exit))
+        self._wire_main(session)
         session.start()
         if directing:
             body = prompts.lead_start_prompt(text, inputs_md, str(workspace), self.run.shared, workspace_empty,
                                              asked_md)
         else:
+            # Going on from the chat's session, the agent keeps that session's instructions (the quick answers'):
+            # its own are said in its first message instead.
             body = prompts.warmup_prompt(text, inputs_md, str(workspace), workspace_empty, self.run.language,
-                                         asked_md, forked=history is not None, mode=mode)
+                                         asked_md, forked=history is not None, mode=mode,
+                                         instructions=system if history is not None else "")
+            self._in_force = self._note_key(self.run)
         session.send(atts.content_blocks(imgs, files, body))
         self._set_phase(Phase.ANALYZING if directing else Phase.WARMING)
         self.tabs.setCurrentIndex(0)
@@ -1593,12 +1839,14 @@ class MainWindow(QMainWindow):
         self._refresh_hotkey_label()
         self.refresh_files()
 
-    def _workspace_files(self) -> list[str]:
-        """Relative paths of the files in the workspace (build/VCS folders skipped, capped at 2000)."""
+    def _workspace_files(self, run: Run | None = None) -> list[str]:
+        """Relative paths of the files in a task's workspace - the current task's unless `run` is given (build/VCS
+        folders skipped, capped at 2000)."""
         found: list[str] = []
-        if self.run is None:
+        run = run if run is not None else self.run
+        if run is None:
             return found
-        root = self.run.workspace
+        root = self._root(run)
         for dirpath, dirnames, filenames in os.walk(root):
             dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS)
             for name in sorted(filenames):
@@ -1634,28 +1882,29 @@ class MainWindow(QMainWindow):
                 self.run.existing.add(file_key(line, self.run.workspace))
         self._files_timer.start()
 
-    def _file_status(self, rel: str) -> str:
-        """ORIGINAL (from the problem, untouched), MODIFIED (from the problem, edited) or NEW (agent-made)."""
-        run = self.run
-        key = file_key(rel, run.workspace)
+    def _file_status(self, rel: str, run: Run | None = None) -> str:
+        """ORIGINAL (from the problem, untouched), MODIFIED (from the problem, edited) or NEW (agent-made) - in
+        the current task, or in `run`."""
+        run = run if run is not None else self.run
+        key = file_key(rel, self._root(run))
         if key not in run.existing:
             return NEW
         if run.directing:  # an external agent writes the files: only their content tells what it touched
-            original, current = run.baseline.get(key), self._current_hash(rel)
+            original, current = run.baseline.get(key), self._current_hash(rel, run)
             return ORIGINAL if original is None or current is None or current == original else MODIFIED
         original = run.baseline.get(key) or run.first_write.get(key)
         if original is None or key not in run.first_write and key not in run.edited:
             return ORIGINAL  # the agent never wrote to it
         try:
-            current = content_hash((run.workspace / rel).read_bytes())
+            current = content_hash((self._root(run) / rel).read_bytes())
         except OSError:
             return ORIGINAL
         return ORIGINAL if current == original else MODIFIED
 
-    def _current_hash(self, rel: str) -> str | None:
+    def _current_hash(self, rel: str, run: Run | None = None) -> str | None:
         """Content hash of a workspace file, re-read only when its size or modification time changed."""
-        run = self.run
-        path = run.workspace / rel
+        run = run if run is not None else self.run
+        path = self._root(run) / rel
         try:
             stat = path.stat()
             cached = run.stat_cache.get(rel)
@@ -1820,7 +2069,11 @@ class MainWindow(QMainWindow):
                 "review": ("reviewing it looks like", "its findings come next."),
                 "answer": ("it wants an answer, not code - that looks like",
                            "get its understanding or how it would work it out, or Answer."),
-            }.get("answer" if self.run and self.run.kind == "answer" else self.run.mode if self.run else "dsa",
+                "draw": ("a system to design - working it out looks like", "he leads, starting with the requirements."),
+                "discuss": ("a design to discuss - that looks like",
+                            "he answers what he is asked; Draw it puts the design on the Diagram tab."),
+            }.get(self.run.kind if self.run and self.run.kind in ("answer", "draw", "discuss")
+                  else self.run.mode if self.run else "dsa",
                   ("solving it looks like", "get its understanding or how it would solve it, or Solve."))
             line = f"*{model} has taken the task in{what} - {took} · {work}* **{judged}** *effort - {then}*"
         elif final:
@@ -1886,6 +2139,7 @@ class MainWindow(QMainWindow):
         to_plan = self.phase in (Phase.ANALYZING, Phase.REVIEWING, Phase.ANSWERING) or self._plan_reply
         self._live_view = self.plan_view if to_plan else self.activity_view
         self._live_view.begin_live()
+        self._live_raw = ""  # what it wrote, with the lines for the app only (shown without them: strip_marks)
         bubble = self._next_reply_bubble()
         if bubble is not None:
             self._reply_live, self._reply_text = bubble, ""
@@ -1930,7 +2184,11 @@ class MainWindow(QMainWindow):
             text, self._lead_shown = self._intro[heading.start():], True
             self.plan_view.reset()
             self.plan_view.begin_live()
-        self._live_view.append_live(text)
+        if self._directing():
+            self._live_view.append_live(text)
+        else:
+            self._live_raw = getattr(self, "_live_raw", "") + text
+            self._live_view.set_live(strip_marks(self._live_raw))
         if self._live_view is self.plan_view:
             self._turn_text += text
         if self._reply_live is not None:
@@ -1939,7 +2197,7 @@ class MainWindow(QMainWindow):
             # Programming, Code Review), all he says in the turn goes to the chat.
             cut = None if self._talking() else HEADING_LINE.search(self._reply_text)
             shown = self._reply_text[: cut.start()] if cut else self._reply_text
-            shown = FIXED_TAIL.sub("", FIXED_RE.sub("", shown))  # his note of what he fixed is not for the chat
+            shown = strip_marks(shown)  # his note of what he fixed, or of his next step, is not for the chat
             if not may_become_skip(shown):  # hold it back while it could still be just "[skip]"
                 self._reply_live.set_status("")
                 self._reply_live.update_text(shown)
@@ -1971,7 +2229,7 @@ class MainWindow(QMainWindow):
             talking = self._talking()
             cut = None if talking else HEADING_LINE.search(self._reply_text)
             reply = (self._reply_text[: cut.start()] if cut else self._reply_text).strip()
-            reply = FIXED_TAIL.sub("", FIXED_RE.sub("", reply)).strip()
+            reply = strip_marks(reply).strip()
             if is_skip(reply):
                 self._drop_skipped(bubble, "· nothing to change - no reply needed")
             elif talking and reply:
@@ -2033,15 +2291,22 @@ class MainWindow(QMainWindow):
         name, inp = block.get("name", "?"), block.get("input") or {}
         self._tool_names[block.get("id", "")] = name
         path = inp.get("file_path") or inp.get("notebook_path") or ""
+        if path:
+            self._tool_paths[block.get("id", "")] = path
         if name == "Write" and path and Path(path).name == self.run.manifest.name and self.run.inputs.name in Path(path).parts:
             self._read_manifest(str(inp.get("content", "")))  # bookkeeping only: not shown in the log
             return
         if self._reply_live is not None and self._talking() and not from_subagent:
             # Talking a request through: the chat shows what he is doing between his sentences.
-            verb = {"Edit": "editing", "MultiEdit": "editing", "Write": "writing", "Read": "reading",
-                    "Grep": "searching the code", "Glob": "looking through the files"}.get(
-                name, "running a command" if name in SHELL_TOOLS else "working")
-            self._reply_live.set_status(f"{verb} {Path(path).name}…" if path else f"{verb}…")
+            board = self.run.mode == "design" and name in EDIT_TOOLS and path
+            if board:  # for the person he talks to, these are the whiteboard: never files
+                status = "drawing…" if path.lower().endswith(".mmd") else "writing it up on the board…"
+            else:
+                verb = {"Edit": "editing", "MultiEdit": "editing", "Write": "writing", "Read": "reading",
+                        "Grep": "searching the code", "Glob": "looking through the files"}.get(
+                    name, "running a command" if name in SHELL_TOOLS else "working")
+                status = f"{verb} {Path(path).name}…" if path else f"{verb}…"
+            self._reply_live.set_status(status)
         md, spaced = tool_summary(name, inp, self.run.workspace)
         if from_subagent:
             md = "↳ " + md
@@ -2062,7 +2327,10 @@ class MainWindow(QMainWindow):
         if self.run is None:
             return
         name = self._tool_names.get(block.get("tool_use_id", ""), "tool")
+        path = self._tool_paths.pop(block.get("tool_use_id", ""), "")
         text = result_text(block).strip()
+        if self.run.mode == "design" and name in EDIT_TOOLS and path and not block.get("is_error"):
+            self._board_written(path)
         if block.get("is_error"):
             first = shorten(text.splitlines()[0] if text else "error", 300)
             self.activity_view.append_markdown(f"⚠️ {name}: {code_span(first)}")
@@ -2081,8 +2349,11 @@ class MainWindow(QMainWindow):
         self.activity_view.append_markdown(f"🚫 {tool} was denied{hint}")
 
     def _main_turn(self, ev: dict) -> None:
+        self._turn_no += 1
         if self._live_view is not None or self._speaking:
             self._main_text_finished()
+        if self._pending_switch is not None and self.main is not None and not self.main.busy:
+            QTimer.singleShot(0, self._run_pending_switch)  # once this turn's end is dealt with
         if self.run is None or self.main is None:
             return
         more = self.main.busy  # messages sent meanwhile will start another turn
@@ -2094,24 +2365,43 @@ class MainWindow(QMainWindow):
             self._lead_turn(ev, more, failed, interrupted)
             return
 
-        if self.phase == Phase.WARMING and not failed:
-            # It has taken the task in, and says how much thinking solving it will take.
-            judged = EFFORT_RE.search(self._turn_text) or EFFORT_RE.search(str(ev.get("result") or ""))
-            kind = KIND_RE.search(self._turn_text) or KIND_RE.search(str(ev.get("result") or ""))
-            self._turn_text = ""
-            self.run.effort = judged.group(1).lower() if judged else "high"
-            if self.run.mode == "dsa" and kind:
-                self.run.kind = kind.group(1).lower()
-            self._show_reading(final=True, judged=self.run.effort)
-            self.activity_view.append_markdown(f"📥 **Task taken in** - judged **{self.run.effort}** effort.")
-            if self.run.mode in TALKING:
-                # It waits for requests; a Code Review starts with its findings (the next message's turn).
-                self._set_phase(Phase.LISTENING)
-                if self.run.mode == "review":
-                    self._review(auto=True)
+        if not more and (self._pending_next is not None or self._pending_kind):
+            # He has stopped what he was doing because the session moves on (＋ Next task, or the person moved
+            # on), or because the task is another kind than he judged (the override box).
+            self._turn_text = self._work_text = ""
+            self._close_agent_replies("*I stopped there - we moved on.*")
+            self.activity_view.append_markdown("✋ Stopped there.")
+            if self._pending_next is not None:
+                pending, self._pending_next = self._pending_next, None
+                self._pending_kind = ""
+                self._begin_next_task(*pending)
             else:
-                self._set_phase(Phase.READY)
-            self._show_work_state()
+                kind, self._pending_kind = self._pending_kind, ""
+                self._apply_kind(kind, override=True)
+            self._update_buttons()
+            return
+
+        if self.phase == Phase.WARMING and not failed:
+            # It has taken the task in, and says how much thinking it will take, what kind of task it is, what
+            # to call it - and, for a further task of the session, which earlier one it continues.
+            said = f"{self._turn_text}\n{ev.get('result') or ''}"
+            self._turn_text = ""
+            run = self.run
+            judged, kind, title, follows = (EFFORT_RE.search(said), KIND_RE.search(said), TITLE_RE.search(said),
+                                            FOLLOWS_RE.search(said))
+            minutes = MINUTES_RE.search(said)
+            if minutes and 3 <= int(minutes.group(1)) <= 240:
+                run.minutes = int(minutes.group(1))
+            run.effort = judged.group(1).lower() if judged else "high"
+            if title:
+                run.title = shorten(title.group(1).strip(" .`*\"'"), 60)
+            picked = kind.group(1).lower() if kind else ""
+            if picked not in KINDS.get(run.mode, ()):
+                picked = KINDS.get(run.mode, (run.kind,))[0]
+            if run.number > 1 and follows and follows.group(1).isdigit() and 1 <= int(follows.group(1)) < run.number:
+                run.follows = int(follows.group(1))
+            self._place_task(run)
+            self._apply_kind(picked, first=True)
             QApplication.alert(self)
             return
 
@@ -2168,12 +2458,26 @@ class MainWindow(QMainWindow):
         work, self._work_text = self._work_text, ""
         if self.run.mode == "review" and self.run.findings and not failed:
             self._note_fixed(work)  # which of his findings this turn fixed - from the button or asked for
+        if self.run.mode == "design" and not failed:
+            self._note_more(work)  # one part drawn of several: he waits for ▶ Go on
+            self._note_next(work)  # the step he takes next, for ▶ Next
         if more:
             return
         # The agent is idle now: a chat message it picked up but never answered in words gets a closing line.
         talking = self.run.mode in TALKING  # request by request: afterwards it waits for the next one
-        self._close_agent_replies("Done - the change is in the Output Code tab." if talking else
+        designing = self.run.mode == "design"
+        self._close_agent_replies("Done - it's on the board." if designing else
+                                  "Done - the change is in the Output Code tab." if talking else
                                   "I've taken that into account - the Coding activity tab shows what I did.")
+        if designing and not failed:
+            # No code to check: a diagram that cannot be drawn goes back to him instead (_fix_diagrams).
+            secs = (ev.get("duration_ms") or 0) / 1000
+            if self._fix_diagrams():
+                return  # still working
+            self.activity_view.append_markdown(f"✅ **Done** - {fmt_secs(secs)} this turn.")
+            self._set_phase(Phase.LISTENING)
+            QApplication.alert(self)
+            return
         if failed and interrupted:
             self.activity_view.append_markdown("✋ **Interrupted.** Send the agent a message (left panel) to continue.")
             self._set_phase(Phase.LISTENING if talking else Phase.INTERRUPTED)
@@ -2190,7 +2494,7 @@ class MainWindow(QMainWindow):
                 listing = "\n".join(f"- {p}" for p in problems)
                 self.activity_view.append_markdown(
                     f"🧪 **Syntax check failed - sent back to the agent to fix:**\n\n{listing}", spaced=True)
-                self.main.send([{"type": "text", "text": prompts.syntax_fix_prompt(problems)}])
+                self._to_agent([{"type": "text", "text": prompts.syntax_fix_prompt(problems)}])
                 self.refresh_files()
                 return  # still coding
             secs = (ev.get("duration_ms") or 0) / 1000
@@ -2448,7 +2752,7 @@ class MainWindow(QMainWindow):
                                            "activity tab, the code in Files.*", spaced=True)
             self.activity_view.append_markdown(f"---\n\n**Solve** - at **{run.effort}** effort{with_asked}.", spaced=True)
             body = prompts.solve_prompt(str(run.workspace), can_run, run.language, str(run.manifest), asked_md)
-        main.send(atts.content_blocks(imgs, files, body + self._take_answered()))
+        self._to_agent(atts.content_blocks(imgs, files, body + self._take_answered()))
 
     def _review(self, auto: bool = False) -> None:
         """Code Review: the agent itself writes its findings, at the effort it judged a careful review needs - the
@@ -2462,7 +2766,7 @@ class MainWindow(QMainWindow):
         self._work_effort(run.effort)
         if not auto:
             self.plan_view.append_markdown("---", spaced=True)
-        token = main.send([{"type": "text", "text": prompts.review_prompt() + self._take_answered()}])
+        token = self._to_agent([{"type": "text", "text": prompts.review_prompt() + self._take_answered()}])
         self._token_phase[token] = Phase.REVIEWING  # it may wait behind a request sent while it read the code in
         self.activity_view.append_markdown(f"🔍 **Review** - at **{run.effort}** effort.")
         self.tabs.setCurrentIndex(0)
@@ -2537,6 +2841,582 @@ class MainWindow(QMainWindow):
         request = self.chat.add("agent", "🧪 Run the tests", prompts.TESTS_REQUEST)
         self._deliver_to_agent(prompts.TESTS_REQUEST, [], [], False, heard_bubble=request, effort="low", spoken=False)
 
+    # ------------------------------------------------------------------ System Design
+    def _understanding_kind(self) -> str:
+        """Which copy job Get Understanding asks for (prompts.COPY_JOBS)."""
+        return "grasp" if self.run is not None and self.run.mode == "design" else "understanding"
+
+    def _design_step(self, auto: bool = False) -> None:
+        """System Design, a system to design: he takes his next step himself - the one he named at the end of
+        his last one - and so says it as his own move, not as a reply (prompts.design_step_prompt). The first
+        one comes by itself once the task is read in (`auto`), the others with ▶ Next. At the effort judged for
+        the design; a step that is said more than worked out (requirements, numbers, wrap-up) at most at medium."""
+        run, main = self.run, self.main
+        if not auto and run is not None and run.more:
+            self._design_part()  # partway through drawing: the click is for the next part
+            return
+        if not (main and main.running and run) or run.mode != "design" or run.kind != "draw":
+            return
+        if not auto and (main.busy or self.phase != Phase.LISTENING):
+            return
+        step = run.next_step if run.next_step.lower() != prompts.NEXT_DONE else ""
+        if not run.steps and not step:
+            step = prompts.DESIGN_STEPS[0]
+        effort = run.effort
+        if prompts.light_step(step) and prompts.EFFORTS.index(effort) > prompts.EFFORTS.index("medium"):
+            effort = "medium"
+        body = prompts.design_step_prompt(step, first=not run.steps, **self._time_of(run))
+        run.steps += 1
+        shown = step or "what is most worth doing now"
+        request = self.chat.add("agent", "▶ His first step" if auto else "▶ Next step", shown)
+        self._deliver_to_agent(shown, [], [], False, heard_bubble=request, effort=effort, spoken=False, prompt=body)
+        request.set_status("· his own next step - nobody asked")
+        self.activity_view.append_markdown(f"▶ **Step {run.steps}:** {shown} - at **{effort}** effort.")
+
+    def _design_part(self) -> None:
+        """▶ Go on: the person has followed the part he drew and is ready - he says and draws the next one, as
+        his own continuation (prompts.design_part_prompt)."""
+        run, main = self.run, self.main
+        if not (main and main.running and run and run.more) or main.busy or self.phase != Phase.LISTENING:
+            return
+        part, run.more = run.more, ""
+        body = prompts.design_part_prompt(part, leading=run.kind == "draw", **self._time_of(run))
+        request = self.chat.add("agent", "▶ Go on", part)
+        self._deliver_to_agent(part, [], [], False, heard_bubble=request, effort=main.effort or run.effort,
+                               spoken=False, prompt=body)
+        request.set_status("· you are ready for the next part")
+        self.activity_view.append_markdown(f"▶ **Go on:** {part}")
+        self._apply_mode()
+
+    def _time_of(self, run: Run) -> dict:
+        """The time a design has (as judged at its read-in; 45 minutes when nothing said) and how much is gone."""
+        return {"minutes": run.minutes or 45, "gone": int((time.time() - run.started) // 60)}
+
+    def _draw_existing(self) -> None:
+        """System Design, a design to discuss: he draws what was shown, without a word - for the user to look
+        at, and as the base for the changes he may be asked for."""
+        run, main = self.run, self.main
+        if not (main and main.running and run) or main.busy or self.phase != Phase.LISTENING:
+            return
+        self._work_effort("medium")
+        token = self._to_agent([{"type": "text", "text": prompts.DRAW_EXISTING + self._take_answered()}])
+        self._token_phase[token] = Phase.CODING
+        self.activity_view.append_markdown("🗺 **Draw it** - the design that was shown, as it is.")
+        run.activity.append("YOU DREW THE DESIGN YOU WERE SHOWN, AS IT IS, ON THE BOARD (nothing was said).")
+        self.tabs.setCurrentIndex(self.tabs.indexOf(self.diagram_stack))
+
+    def _note_more(self, text: str) -> None:
+        """System Design: did this turn draw one part of several (MORE_RE)? Then he waits for ▶ Go on."""
+        if is_skip(text.strip()):
+            return  # a diagram fixed on the side (_fix_diagrams): where he stands is unchanged
+        found = MORE_RE.findall(text)
+        part = found[-1].strip().strip("`*.:").strip() if found else ""
+        self.run.more = "" if part.lower() in ("", "none", prompts.NEXT_DONE) else part
+        if self.run.more:
+            self.activity_view.append_markdown(f"⏸ Waiting for you before the next part: **{self.run.more}**")
+        self._apply_mode()
+        self._update_buttons()
+        self._show_work_state()
+
+    def _note_next(self, text: str) -> None:
+        """System Design, leading: the step he said he takes next (NEXT_RE), for ▶ Next."""
+        found = NEXT_RE.findall(text)
+        if not found or self.run.kind != "draw":
+            return
+        step = found[-1].strip().strip("`*.:").strip()
+        if not step:
+            return
+        self.run.next_step = step
+        self.activity_view.append_markdown("🏁 He has covered the design." if step.lower() == prompts.NEXT_DONE
+                                           else f"⏭ Next he moves on to: **{step}**")
+        self._update_buttons()
+        self._show_work_state()
+
+    def _board_written(self, path: str) -> None:
+        """System Design: he has written on the whiteboard - a diagram (drawn on the Diagram tab) or his notes
+        (the Design notes tab)."""
+        run = self.run
+        file = Path(path) if Path(path).is_absolute() else run.workspace / path
+        try:
+            file.resolve().relative_to(run.workspace)
+            text = file.read_text(encoding="utf-8")
+        except (OSError, ValueError, UnicodeDecodeError):
+            return
+        if file.suffix.lower() == ".mmd":
+            if self._board_turn != self._turn_no:
+                # His first drawing in this turn: what stood out as new on the other diagrams is not new any more.
+                self._board_turn = self._turn_no
+                self.diagram_panel.settle_new(keep=file.name)
+            self.diagram_panel.show_diagram(file.name, text)
+        elif file.name.lower() == prompts.DESIGN_DOC:
+            bar = self.design_view.verticalScrollBar()
+            at = bar.value()
+            self.design_view.reset()
+            self.design_view.append_markdown(text, spaced=True)
+            bar.setValue(at)
+            self._mark_tab(self.notes_stack)
+
+    def _diagram_drawn(self, name: str) -> None:
+        """A diagram has its new picture: the first one brings the Diagram tab up, later ones put a dot on it."""
+        run = self.run
+        if run is None:
+            return
+        if not self.diagram_panel.errors():
+            run.diagram_fixes = 0
+        if not run.drawn:
+            run.drawn = True
+            self.tabs.setCurrentIndex(self.tabs.indexOf(self.diagram_stack))
+        else:
+            self._mark_tab(self.diagram_stack)
+        self.activity_view.append_markdown(f"🗺 Drawn: {code_span(name)}")
+
+    def _diagram_failed(self, name: str, error: str) -> None:
+        """A diagram he wrote cannot be drawn: it goes back to him - now, if his turn is over already."""
+        if self.run is None:
+            return
+        self.activity_view.append_markdown(f"⚠️ **{code_span(name)} cannot be drawn:** "
+                                           f"{code_span(shorten(' '.join(error.split()), 200))}")
+        self._mark_tab(self.diagram_stack)
+        if self.main is not None and not self.main.busy and self.phase == Phase.LISTENING:
+            self._fix_diagrams()
+
+    def _fix_diagrams(self) -> bool:
+        """Send the diagrams that cannot be drawn back to him, at most MAX_SYNTAX_ROUNDS times in a row - quick
+        work, at low effort. True when they were sent (he is at work again)."""
+        run, main = self.run, self.main
+        errors = self.diagram_panel.errors()
+        if not errors or main is None or not main.running or run.diagram_fixes >= MAX_SYNTAX_ROUNDS:
+            return False
+        run.diagram_fixes += 1
+        self._work_effort("low")
+        token = self._to_agent([{"type": "text", "text": prompts.diagram_fix_prompt(errors)}])
+        self._token_phase[token] = Phase.CODING
+        self.activity_view.append_markdown("🧪 **Sent back to him to fix:** " + ", ".join(map(code_span, errors)))
+        return True
+
+    def _mark_tab(self, widget) -> None:
+        """A dot on a tab whose content changed while another one was open."""
+        index = self.tabs.indexOf(widget)
+        if index >= 0 and index != self.tabs.currentIndex() and not self.tabs.tabText(index).endswith(" ●"):
+            self.tabs.setTabText(index, self.tabs.tabText(index) + " ●")
+
+    def _tab_seen(self, index: int) -> None:
+        text = self.tabs.tabText(index)
+        if text.endswith(" ●"):
+            self.tabs.setTabText(index, text[:-2])
+
+    def _phase_words(self) -> str:
+        """Where he stands, as a copy of the working session is told (PHASE_WORDS)."""
+        run = self.run
+        if run is not None and run.mode == "design" and run.more and self.phase == Phase.LISTENING:
+            return (f"you are partway through drawing: you have said and drawn one part and are waiting for the "
+                    f"person before the next one ({run.more})")
+        words = DESIGN_PHASE_WORDS if run is not None and run.mode == "design" else PHASE_WORDS
+        return words.get(self.phase, PHASE_WORDS.get(self.phase, self.phase.value))
+
+    # ------------------------------------------------------------------ the tasks of a session
+    # One agent does one task after another (＋ Next task, or by itself when the person moves on). It reads each
+    # new one in, judges what kind of task it is and whether it continues an earlier one, and then goes on - as
+    # a copy of itself (it keeps all it knew) - in that task's folder: the earlier task's when it continues it,
+    # else a new one. Every task keeps its own first tab, Diagram, Design notes and files to look at again.
+    def _wire_main(self, session) -> None:
+        """Make `session` the agent and hear what it does."""
+        self.main = session
+        g = lambda fn: self._guard(session, fn)  # noqa: E731
+        session.initialized.connect(g(self._main_init))
+        session.status_changed.connect(g(self._main_status_changed))
+        session.text_started.connect(g(self._main_text_started))
+        session.text_delta.connect(g(self._main_text_delta))
+        session.text_finished.connect(g(self._main_text_finished))
+        session.thinking_finished.connect(g(self._main_thinking))
+        session.tool_used.connect(g(self._main_tool))
+        session.tool_result.connect(g(self._main_tool_result))
+        session.permission_denied.connect(g(self._main_denied))
+        session.message_consumed.connect(g(self._main_message_consumed))
+        session.turn_finished.connect(g(self._main_turn))
+        session.process_finished.connect(g(self._main_exit))
+
+    def _new_task_views(self) -> tuple:
+        """A first tab, a Diagram and Design notes of a task's own - from now on the ones written to."""
+        plan, diagram, notes = LiveMarkdownView(), DiagramPanel(renderer=self.mermaid), LiveMarkdownView()
+        diagram.updated.connect(lambda name, panel=diagram: panel is self.diagram_panel and self._diagram_drawn(name))
+        diagram.render_failed.connect(
+            lambda name, error, panel=diagram: panel is self.diagram_panel and self._diagram_failed(name, error))
+        scale = min(4.0, max(0.75, self.settings.reading_scale))
+        for view in (plan, notes):
+            view.setProperty("remote_watched", True)  # the remote page marks the part of it on screen here
+            view.set_text_scale(scale)
+        for stack, view in ((self.plan_stack, plan), (self.diagram_stack, diagram), (self.notes_stack, notes)):
+            stack.addWidget(view)
+            stack.setCurrentWidget(view)
+        self.plan_view, self.diagram_panel, self.design_view = plan, diagram, notes
+        return plan, diagram, notes
+
+    def _reset_task_views(self) -> None:
+        """A new session: one fresh set of task views; the earlier session's go."""
+        self._live_view = None
+        for stack in (self.plan_stack, self.diagram_stack, self.notes_stack):
+            while stack.count():
+                widget = stack.widget(0)
+                stack.removeWidget(widget)
+                widget.deleteLater()
+        self._new_task_views()
+        self.task_picker.blockSignals(True)
+        self.task_picker.clear()
+        self.task_picker.blockSignals(False)
+        self.task_row.hide()
+
+    def _viewed_run(self) -> Run | None:
+        """The task the tabs show: one picked above them, else the current one."""
+        return self._viewed if self._viewed is not None else self.run
+
+    def _root(self, run: Run) -> Path:
+        """Where a task's files are to look at: its folder - or, when a later task went on in that folder, a copy
+        of it as the task ended."""
+        return run.snapshot or run.workspace
+
+    def _task_label(self, run: Run) -> str:
+        title = run.title or shorten(" ".join(run.task.split()), 50) or "(from the screenshots)"
+        kind = KIND_NAMES.get(run.kind, "") if run.mode in KIND_MODE.values() else ""
+        follows = f" - continues {run.follows}" if run.follows else ""
+        return f"{run.number} · {title}" + (f"  ({kind}{follows})" if kind else "") + ("  ◀ now" if run is self.run else "")
+
+    def _refresh_task_picker(self) -> None:
+        viewed = self._viewed_run()
+        self.task_picker.blockSignals(True)
+        self.task_picker.clear()
+        for run in self.tasks:
+            self.task_picker.addItem(self._task_label(run))
+        self.task_picker.setCurrentIndex(next((i for i, t in enumerate(self.tasks) if t is viewed), -1))
+        self.task_picker.blockSignals(False)
+        self.task_row.setVisible(len(self.tasks) > 1)
+        self.viewing_label.setText("" if viewed is self.run else
+                                   "an earlier task, as it ended - the work goes on in the latest")
+
+    def _view_task(self, index: int) -> None:
+        """Show task `index` of the session in the tabs: its notes, diagrams and files."""
+        if not 0 <= index < len(self.tasks):
+            return
+        run = self.tasks[index]
+        self._viewed = None if run is self.run else run
+        for stack, view in zip((self.plan_stack, self.diagram_stack, self.notes_stack), run.views):
+            stack.setCurrentWidget(view)
+        self.file_tree.clear()
+        self.code_view.set_code("")
+        self.file_label.clear()
+        self._shown_file = None
+        root = self._root(run)
+        self.explorer_title.setText(f"EXPLORER  ·  {(run.given or root).name.upper()}"
+                                    + ("  (AS THE TASK ENDED)" if run.snapshot else ""))
+        self.refresh_files()
+        self._refresh_task_picker()
+        self._apply_mode()
+
+    def _open_next_task(self) -> None:
+        """＋ Next task: the task box opens again, for the next task of this session."""
+        run = self.run
+        if run is None or run.directing or self._next_open:
+            return
+        self._next_open = True
+        self.task.clear()
+        if mode_of(self.mode_combo.currentText()) == "vibe":
+            self.mode_combo.setCurrentText(MODE_AUTO)
+        number = len(self.tasks) + 1
+        self.start_btn.setText(f"▶  Start task {number}")
+        self.start_btn.setToolTip("The same agent goes on to this task, knowing everything so far: it reads it in, "
+                                  "judges what kind of task it is and whether it continues an earlier one.")
+        self.cancel_next_btn.show()
+        self.task_box.setTitle(f"Task {number} - text, screenshots and files")
+        self.task_box.show()
+        self.task.edit.setFocus()
+        self._update_buttons()
+
+    def _close_next_box(self) -> None:
+        self._next_open = False
+        self.cancel_next_btn.hide()
+        self.start_btn.setText("▶  Start")
+        self.start_btn.setToolTip(self._start_tip)
+        self.task_box.setTitle("Task - text, screenshots and files")
+
+    def _cancel_next_task(self) -> None:
+        self._close_next_box()
+        self.task_box.hide()
+        self._update_buttons()
+
+    def _start_next_task(self, text: str, attachments: list, label: str, place: str, auto: bool = False) -> None:
+        """The session's next task: the same agent goes on to it. What it is in the middle of is stopped first -
+        after a question, unless the person moved on themselves (`auto`) - and the task starts once it has."""
+        run, main = self.run, self.main
+        if run is None or main is None or not main.running:
+            return
+        if mode_of(label) == "vibe":
+            QMessageBox.information(self, APP_NAME, "Vibe-Coding is a session of its own: use ⟲ New session for it.")
+            return
+        self._close_next_box()
+        self.task_box.hide()
+        self.task.clear()
+        if main.busy or self._pending_next is not None:
+            if not auto and self._pending_next is None and QMessageBox.question(
+                    self, APP_NAME, f"He is still working on task {run.number}. Stop that and move on to the next "
+                                    "task?") != QMessageBox.StandardButton.Yes:
+                return
+            self._pending_next = (text, attachments, label, place)
+            self._interrupt_requested = True
+            main.interrupt()
+            self._notice("Moving on to the next task as soon as he has stopped his current step…")
+            self._update_buttons()
+            return
+        self._begin_next_task(text, attachments, label, place)
+
+    def _begin_next_task(self, text: str, attachments: list, label: str, place: str) -> None:
+        """Hand the next task to the agent (which is free): it reads it in, as any task (Phase.WARMING)."""
+        old = self.run
+        number = len(self.tasks) + 1
+        mode = mode_of(label)
+        task_dir = old.root / f"task-{number}"
+        inputs = task_dir / "inputs"
+        try:
+            inputs.mkdir(parents=True, exist_ok=True)
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            try:
+                imgs, files = atts.prepare(attachments, inputs, new_part_only=self.settings.new_part_only)
+            finally:
+                QApplication.restoreOverrideCursor()
+            (task_dir / "task.md").write_text(text, encoding="utf-8")
+        except OSError as exc:
+            QMessageBox.critical(self, APP_NAME, f"Could not prepare the task's folder:\n{shorten(str(exc), 1200)}")
+            return
+        # What belonged to the task before is settled: its kept requests and its copies' work.
+        for request in self._asked:
+            if request.bubble in self.chat.bubbles():
+                request.bubble.set_status("· work request - dropped: the session moved on to the next task")
+        self._asked = []
+        self._show_asked()
+        self._stop_jobs()
+        self._close_agent_replies("*We moved on to the next task.*")
+        self.settings.mode, self.settings.code_place = label, place
+        self.settings.save()
+        inputs_md = atts.describe_inputs(imgs, files)
+        new = Run(f"{old.id}-{number}", task_dir, inputs, old.workspace, text, inputs_md, language=LANG_OTHER,
+                  mode=mode, place=place, given=old.given, kind=KINDS.get(mode, ("code",))[0], number=number,
+                  root=old.root)
+        self._viewed = None
+        new.views = self._new_task_views()
+        self.tasks.append(new)
+        self.run = new
+        self._turn_text = self._work_text = ""
+        self._run_secs, self._syntax_rounds = 0.0, 0
+        # In the chat and the activity log: where one task ends and the next begins.
+        self.chat.add("agent", f"📋 Task {number}", shorten(text, 400) or "*(see the screenshots and files)*")
+        self.activity_view.append_markdown(f"---\n\n**Task {number}** · {len(imgs)} screenshot(s), {len(files)} "
+                                           "file(s)", spaced=True)
+        earlier = [(t.number, t.title or shorten(" ".join(t.task.split()), 60) or "(from the screenshots)",
+                    prompts.KIND_LABELS.get(t.kind, t.mode), str(t.workspace)) for t in self.tasks[:-1]]
+        body = prompts.warmup_prompt(text, inputs_md, str(old.workspace), False, LANG_OTHER, mode=mode,
+                                     number=number, earlier=earlier)
+        self._work_effort(COPY_EFFORT)  # read in at the level its copies work at, as every task
+        self.main.send(atts.content_blocks(imgs, files, body))
+        self._set_phase(Phase.WARMING)
+        self._apply_mode()
+        self._refresh_task_picker()
+        self.file_tree.clear()
+        self.code_view.set_code("")
+        self.file_label.clear()
+        self._shown_file = None
+        self.tabs.setCurrentIndex(0)
+        self._reading_clock, self._reading_line, self._reading_shots = QElapsedTimer(), None, len(imgs)
+        self._reading_clock.start()
+        self._show_reading()
+        self._update_buttons()
+
+    def _place_task(self, run: Run) -> None:
+        """A further task, read in: its folder - the one of the task it continues, or a new one; with a project
+        folder given, always that project. A task whose folder now goes on being worked in is kept as it ended."""
+        if run.number == 1:
+            return  # its folder was there from the start
+        earlier = self.tasks[run.follows - 1] if run.follows else None
+        if run.given is not None:
+            folder, continues = self.tasks[0].workspace, "the project you are working on, as the earlier tasks left it"
+        elif earlier is not None:
+            folder, continues = earlier.workspace, f"task {earlier.number} ({earlier.title or 'the earlier task'})"
+        else:
+            folder, continues = run.dir / "workspace", ""
+            folder.mkdir(parents=True, exist_ok=True)
+        run.workspace = folder.resolve()
+        for task in self.tasks[:-1]:
+            if task.workspace == run.workspace and task.snapshot is None:
+                self._freeze(task)
+        self._snapshot_existing()  # what is in the folder now is where this task starts from
+        run.intro = prompts.task_note(run.number, str(run.workspace), continues) + run.intro
+        self.explorer_title.setText(f"EXPLORER  ·  {(run.given or run.workspace).name.upper()}")
+        self.activity_view.append_markdown(
+            f"📁 Task {run.number} is worked on in {code_span(run.workspace)}"
+            + (f" - it continues task {earlier.number}." if earlier else "."))
+
+    def _freeze(self, run: Run) -> None:
+        """Keep a copy of a task's folder as the task ended, to look at later: a later task goes on in it."""
+        count, size = folder_weight(run.workspace)
+        if count > CLONE_ASK_FILES or size > CLONE_ASK_BYTES:
+            return  # too large to keep a copy of: it is shown as it is now
+        target = run.dir / "as-it-ended"
+        try:
+            if target.exists():  # an older copy (the work went back and forth): this one replaces it
+                shutil.rmtree(target)
+            shutil.copytree(run.workspace, target, ignore=shutil.ignore_patterns(*CLONE_SKIP, *SKIP_DIRS),
+                            dirs_exist_ok=True)
+        except OSError:
+            return
+        run.snapshot = target.resolve()
+
+    def _note_key(self, run: Run) -> str:
+        """Which task instructions a task needs: the whiteboard of a design, or where the code is."""
+        return "design" if run.mode == "design" else f"place:{run.place}"
+
+    def _need_instructions(self, run: Run) -> None:
+        """A task that needs other instructions than the agent follows gets them with its first piece of work
+        (prompts.instructions_note)."""
+        needed = self._note_key(run)
+        if needed == self._in_force:
+            return
+        note = prompts.DESIGN_NOTE if run.mode == "design" else prompts.place_note(run.place)
+        run.intro += prompts.instructions_note(note, after_design=self._in_force == "design")
+        self._in_force = needed
+
+    def _plan_move(self, run: Run) -> None:
+        """Before the task's first piece of work the agent goes on in its folder - as a copy of itself, which
+        knows everything so far. Only when it is not working there already."""
+        run.move = run.workspace if Path(self.main.cwd).resolve() != run.workspace else None
+
+    def _to_agent(self, blocks: list) -> str:
+        """Every piece of work goes to the agent through here: before a task's first one, the agent moves to
+        the task (_plan_move), and what the task begins with (Run.intro) is said with it."""
+        run = self.run
+        if run is not None and run.move is not None:
+            cwd, run.move = run.move, None
+            self._move_session(cwd)
+        if run is not None and run.intro:
+            blocks = [{"type": "text", "text": run.intro}] + list(blocks)
+            run.intro = ""
+        return self.main.send(blocks)
+
+    def _move_session(self, cwd: Path) -> None:
+        """The agent goes on in `cwd`: a copy of it, which knows everything it knew (an API session, which cannot
+        be copied, is simply pointed there). The copy keeps the instructions it started with - a fork does not
+        take up new ones (measured) - so a task's own are said in the conversation (_need_instructions)."""
+        old = self.main
+        if not isinstance(old, ClaudeSession) or not old.session_id:
+            if hasattr(old, "system"):
+                old.cwd = Path(cwd).resolve()
+            return
+        new = ClaudeSession(
+            claude_path=old.claude_path, cwd=cwd, model=old.model, effort=old.effort,
+            permission_mode=old.permission_mode, tools=old.tools, add_dirs=old.add_dirs,
+            append_system_prompt=old.append_system_prompt, name=old.name, log_path=self.run.dir / "events.jsonl",
+            resume=old.session_id, fork=True, parent=self,
+        )
+        self._jobs_cost_done += old.total_cost  # its cost so far stays in the total
+        new.moved_from = old.session_id  # quick answers copy that until the new one has its own (conversation_of)
+        self._wire_main(new)
+        new.start()
+        if not old.thinking:
+            new.set_thinking(False)
+        old.stop()
+        old.deleteLater()
+        self.activity_view.append_markdown(f"🔀 The agent goes on in {code_span(cwd)} - the same conversation.")
+
+    def _apply_kind(self, kind: str, first: bool = False, override: bool = False) -> None:
+        """The task is `kind` (KIND_MODE): judged as it was read in (`first`), or picked in the override box.
+        Its flow starts: Solve waits; a review, or the first step of a design he leads, begins by itself."""
+        run = self.run
+        old = run.kind
+        run.kind = kind
+        if run.mode == "auto" or override:
+            run.mode = KIND_MODE.get(kind, "dsa")
+        if override:
+            run.intro += prompts.kind_correction(old, kind)
+            run.findings, run.fixed, run.next_step, run.steps = [], set(), "", 0
+            self.fix_menu.clear()
+        self._plan_move(run)
+        self._need_instructions(run)
+        if run.mode == "design":
+            self.diagram_panel.warm()
+        if first:
+            self._show_reading(final=True, judged=run.effort)
+            timing = f" · about {run.minutes or 45} minutes" if run.mode == "design" else ""
+            self.activity_view.append_markdown(f"📥 **Task taken in** - judged **{run.effort}** effort · "
+                                               f"{prompts.KIND_LABELS.get(kind, kind)}{timing}.")
+        else:
+            self.activity_view.append_markdown(f"🔁 **Now worked on as {prompts.KIND_LABELS.get(kind, kind)}.**")
+            self.plan_view.append_markdown(f"*Now worked on as {prompts.KIND_LABELS.get(kind, kind)}.*")
+        self._refresh_task_picker()
+        if run.mode in TALKING:
+            # It waits for requests; a Code Review starts with its findings, a system to design with his first
+            # step - he leads it.
+            self._set_phase(Phase.LISTENING)
+            self._apply_mode()
+            if run.mode == "review":
+                self._review(auto=True)
+            elif run.mode == "design" and run.kind == "draw":
+                self._design_step(auto=True)
+            self._deliver_kept()
+        else:
+            self._set_phase(Phase.READY)
+            self._apply_mode()
+        self._show_work_state()
+
+    def _deliver_kept(self) -> None:
+        """Requests kept while he read an Auto task in, when it turns out to be one that takes requests at once."""
+        asked = list(self._asked)
+        if not asked or self.run.mode == "dsa":
+            return
+        try:
+            imgs, files = atts.prepare([att for request in asked for att in request.attachments],
+                                       self.run.inputs / "requests", "Request image",
+                                       new_part_only=self.settings.new_part_only)
+        except OSError:
+            imgs, files = [], []
+        note = self._take_asked(asked, imgs, files, status="· work request - went to the agent")
+        self._deliver_to_agent(note, imgs, files, False, spoken=False)
+
+    def _kind_picked(self, index: int) -> None:
+        """The override box: this task is another kind than he judged. What he is doing is stopped first."""
+        kind = self.kind_combo.itemData(index)
+        run, main = self.run, self.main
+        if run is None or main is None or kind == run.kind:
+            return
+        if main.busy:
+            self._pending_kind = kind
+            self._interrupt_requested = True
+            main.interrupt()
+            self._update_buttons()
+            return
+        self._apply_kind(kind, override=True)
+
+    def _move_on(self, bubble: MessageBubble, said: str) -> None:
+        """The quick model heard the person move on to a new task (prompts.NEW_TASK_MARK; on in Settings): the
+        session moves on to it, with what was said - and shown - as the task. With no session yet, the first task
+        starts, as if Start had been pressed (once the quick answer has stopped: the task goes on from the chat)."""
+        if self.run is None:
+            self._queue_request(bubble, said)
+            if bubble.question is not None:
+                bubble.question.set_status("· a task - the agent starts on it")
+            self._start_when_quiet = True
+            QTimer.singleShot(4000, self._start_kept_task)  # in case the quick answer never says it has stopped
+            return
+        bubble.passed_on = True
+        heard = bubble.forward[0] if hasattr(bubble, "forward") else ""
+        typed = getattr(bubble, "typed", "")
+        if said:
+            bubble.set_markdown(said)
+            bubble.finish()
+        else:
+            self.chat.remove(bubble)
+        if bubble.question is not None:
+            bubble.question.set_status("· a new task - the session moved on to it")
+        text = "\n\n".join(part for part in (heard, typed) if part)
+        self._start_next_task(text, list(getattr(bubble, "attached", [])), MODE_AUTO, self.place_combo.currentText(),
+                              auto=True)
+
     def _work_effort(self, judged: str | None, thinking: bool | None = None) -> None:
         """Before work goes to the agent: think at the level judged for it (the task's own level when nothing
         was judged). While it is busy the level only goes up: lowering it would cut the work in progress short.
@@ -2577,7 +3457,7 @@ class MainWindow(QMainWindow):
                 self._notice("The agent is busy - ask again when it is free.")
                 return
             self._plan_reply = kind
-            main.send([{"type": "text", "text": prompts.copy_job_prompt(kind, own=True, latest=self._latest_ask)
+            self._to_agent([{"type": "text", "text": prompts.copy_job_prompt(kind, own=True, latest=self._latest_ask)
                         + self._take_answered()}])
             self._show_work_state()
             self._update_buttons()
@@ -2592,11 +3472,11 @@ class MainWindow(QMainWindow):
             append_system_prompt=main.append_system_prompt,  # as the agent's, so that it reads the agent's cache
             log_path=run.dir / f"{kind}.jsonl",
             persist=False,
-            resume=main.session_id,
+            resume=conversation_of(main),
             fork=True,
             parent=self,
         )
-        job = CopyJob(kind, copy)
+        job = CopyJob(kind, copy, view=self.plan_view)
         copy.text_started.connect(lambda job=job: self._job_text(job, "\n\n" if job.text.strip() else ""))
         copy.text_delta.connect(lambda text, job=job: self._job_text(job, text))
         copy.turn_finished.connect(lambda ev, job=job: self._job_turn(job, ev))
@@ -2642,10 +3522,10 @@ class MainWindow(QMainWindow):
     def _show_jobs(self) -> None:
         """What the copies write, on the first tab one after another in the order they were asked for: the
         oldest one not shown in full streams live, the ones after it wait their turn."""
-        view = self.plan_view
         for job in self._jobs:
             if job.closed:
                 continue
+            view = job.view or self.plan_view
             if len(job.text) > job.shown:
                 if job.shown == 0:
                     view.begin_live()
@@ -2687,6 +3567,18 @@ class MainWindow(QMainWindow):
                if busy and main.effort else "")
         if self.phase == Phase.WARMING:
             parts = ["Taking the task in…"]
+        elif run.mode == "design":
+            step = run.next_step if run.next_step.lower() != prompts.NEXT_DONE else ""
+            if busy:
+                parts = [f"Working on the design{how}…"]
+            elif run.more:
+                parts = [f"He waits for you - ▶ Go on when you have that part, and he draws the next: {run.more}"]
+            elif run.kind == "discuss":
+                parts = ["Ready - ask about the design, or for changes to it"]
+            elif run.next_step.lower() == prompts.NEXT_DONE:
+                parts = ["He has covered the design - ▶ Next lets him pick what is worth going deeper into"]
+            else:
+                parts = [f"Next he moves on to: {step}" if step else "Ready for his next step"]
         elif run.mode == "dsa" and run.kind == "answer":
             parts = [f"Answering{how}…" if busy else f"It wants an answer, not code · {run.effort} effort"]
         elif run.mode == "dsa":
@@ -2844,6 +3736,10 @@ class MainWindow(QMainWindow):
         unseen = self._project_state()[0]
         if prompt:
             body = prompt + extra
+        elif self.run.mode == "design":
+            # System Design: a question is answered, a change to the design is made on the board and talked through.
+            body = prompts.design_request_prompt(message + extra, said, leading=self.run.kind == "draw",
+                                                 **self._time_of(self.run))
         elif talking:
             # Pair Programming / Code Review: done then and there, talked through in the chat.
             # Code that came only as screenshots or files is put in his folder, as it is, before his first change.
@@ -2864,7 +3760,7 @@ class MainWindow(QMainWindow):
         shown = heard or "(see attachments)"
         if count:
             shown += f" *+ {count} attachment(s)*"
-        token = self.main.send(atts.content_blocks(imgs, files, body))
+        token = self._to_agent(atts.content_blocks(imgs, files, body))
         label = "Heard → agent (interrupting)" if interrupt_first else "Heard → agent"
         self.activity_view.append_markdown(f"🗨️ **{label}:** {shown}")
         # In the chat: what was heard, then (above it) the developer's own reply once the agent picks it up.
@@ -2879,7 +3775,8 @@ class MainWindow(QMainWindow):
         reply.set_waiting(True)
         reply.setToolTip(f"Reply from the coding session ({self.settings.coding_model})")
         self._agent_replies[token] = reply
-        self.run.activity.append(f"THE USER ASKED YOU, WHILE YOU WERE CODING: {heard or '(see the attachments)'}"
+        self.run.activity.append(f"YOUR OWN NEXT STEP (nobody asked for it): {heard}" if prompt else
+                                 f"THE USER ASKED YOU, WHILE YOU WERE CODING: {heard or '(see the attachments)'}"
                                  if not waiting else f"THE USER TOLD YOU, BEFORE YOU STARTED: {heard or '(see the attachments)'}")
         if talking:
             self._token_phase[token] = Phase.CODING  # it may wait behind the warm-up or the review
@@ -2926,7 +3823,7 @@ class MainWindow(QMainWindow):
         must not hear about the developer's copy or work that is not in the user's folder yet (_side_body)."""
         main = self.main
         if (self.run is None or self.run.given is not None or not isinstance(main, ClaudeSession)
-                or not main.session_id or not main.running or self.settings.side_provider != llm.CLAUDE_CODE):
+                or not conversation_of(main) or not main.running or self.settings.side_provider != llm.CLAUDE_CODE):
             return None
         return main
 
@@ -2944,7 +3841,14 @@ class MainWindow(QMainWindow):
         system = (prompts.LEAD_SIDE_SYSTEM if self._directing() else
                   prompts.SIDE_SYSTEM_GIVEN if self.run and self.run.given else prompts.SIDE_SYSTEM)
         # Copies of the agent have its system prompt, place note included; a session of its own gets it here.
-        return system + prompts.name_note(self.settings.dev_name) + (prompts.place_note(self.run.place) if self.run else "")
+        return system + prompts.name_note(self.settings.dev_name) + self._system_note()
+
+    def _system_note(self) -> str:
+        """What the task's sessions are told about where the work is seen: the whiteboard of a design session,
+        or where the code is (prompts.place_note)."""
+        if self.run is None:
+            return ""
+        return prompts.DESIGN_NOTE if self.run.mode == "design" else prompts.place_note(self.run.place)
 
     def _ensure_side(self):
         """The quick-answer session the next question goes to, started if need be.
@@ -2956,14 +3860,14 @@ class MainWindow(QMainWindow):
         provider = s.side_provider
         source, side = self._copy_source(), self.side
         if source is not None:
-            if side is not None and side.running and getattr(side, "fork", False) and side.resume == source.session_id:
+            if side is not None and side.running and getattr(side, "fork", False) and side.resume == conversation_of(source):
                 if side.copied_at == source.entries and not side.busy:
                     return side
                 if side.busy:
                     self._finishing.append(side)
                     side = self.side = None
             standby = self._standby
-            if (standby is not None and standby.running and standby.resume == source.session_id
+            if (standby is not None and standby.running and standby.resume == conversation_of(source)
                     and (standby.copied_at == source.entries or source.busy)):
                 # Up to date - or, while the agent works, at most a few seconds behind (it can read the files).
                 if side is not None:
@@ -3042,7 +3946,7 @@ class MainWindow(QMainWindow):
             append_system_prompt=source.append_system_prompt,
             log_path=self.run.dir / "quick_answers.jsonl" if self.run else None,
             persist=False,
-            resume=source.session_id,
+            resume=conversation_of(source),
             fork=True,
             parent=self,
         )
@@ -3079,7 +3983,7 @@ class MainWindow(QMainWindow):
         entries = source.entries if source is not None else -1
         quiet, self._entries_seen = entries == self._entries_seen, entries
         if standby is not None:
-            current = standby.running and source is not None and standby.resume == source.session_id
+            current = standby.running and source is not None and standby.resume == conversation_of(source)
             if current and (standby.copied_at == entries or (not quiet and standby.made.elapsed() < STANDBY_MAX_AGE_MS)):
                 return
             self._end_side(standby)
@@ -3087,7 +3991,7 @@ class MainWindow(QMainWindow):
         if source is None:
             return
         side = self.side
-        if (side is not None and getattr(side, "fork", False) and side.resume == source.session_id
+        if (side is not None and getattr(side, "fork", False) and side.resume == conversation_of(source)
                 and side.copied_at == entries and not side.busy):
             return  # the current copy is up to date and free: it is the one waiting
         self._standby = self._new_copy(source)
@@ -3161,6 +4065,11 @@ class MainWindow(QMainWindow):
             # Nothing was said: attachments on their own are news from the coding agent's side, and reading
             # that is the developer's job, not a question for the quick model.
             self._send_to_agent("", False)
+            return
+        if not heard and self.run is not None and self.main and self.main.running and not self.ask.is_empty():
+            # Screenshots or files with nothing said, while a task is on: more of the task - the problem that
+            # was only named ("let's move to a DSA problem"), the code, the design - not a question to skip.
+            self._more_of_task()
             return
         side = self._ensure_side()
         if side is None:
@@ -3249,15 +4158,17 @@ class MainWindow(QMainWindow):
                 first=self.side.first, task=run.task, inputs=run.inputs_md,
                 workspace=str(run.given or run.workspace), given=run.given is not None,
                 pending=pending, landed=landed, doing=self._changes_in_progress() if pending else "",
-                phase=PHASE_WORDS.get(self.phase, self.phase.value), plan=plan,
+                phase=self._phase_words(), plan=plan,
                 activity=activity, touched=run.touched, heard=heard, heard_context=heard_context,
                 can_forward=can_forward, briefing=briefing, earlier=earlier, queue=self._keeps_work(),
+                design=run.mode == "design", moves_on=self._moves_on(), tasks=self._tasks_note(),
             )
         return prompts.side_prompt(
             question=question, attachments=att_desc,
             first=self.side.first, task=None, inputs="", workspace="", phase=self.phase.value,
             plan=None, activity="", touched=[], heard=heard, heard_context=heard_context,
             can_forward=False, queue=True,  # no task yet: a work request is kept for it (_queue_request)
+            moves_on=self._moves_on(),  # ...and with "move on by itself" on, a task set here starts it
         )
 
     def _post_message(self, to_ai: bool, sender: str = "remote", text: str | None = None,
@@ -3335,13 +4246,29 @@ class MainWindow(QMainWindow):
         if getattr(bubble, "passed_on", False):
             return  # its first words are said and the message is with the working session: the rest is not wanted
         bubble.raw += text
-        if reply_mark(bubble.raw) == prompts.AGENT_MARK:
+        if reply_mark(bubble.raw) == prompts.NEW_TASK_MARK:
+            # The person moved on to a new task: once his two sentences are there, the session moves on too.
+            said, finished = held_line(bubble.raw, prompts.NEW_TASK_MARK)
+            if finished and self._moves_on():
+                self._move_on(bubble, said)
+                if side.busy:
+                    side.interrupt()
+            elif said:
+                bubble.set_status("")
+                bubble.update_text(said)
+        elif reply_mark(bubble.raw) == prompts.AGENT_MARK:
             # It is being passed on to the working session, which takes a while: what the developer says
             # in the meantime ("Understood - let me think that through.") is shown as it comes in.
             said, finished = held_line(bubble.raw)
+            target = self._task_for(bubble.raw) if finished else None
             hand = (self._pass_on if self._can_pass_on(bubble) else
                     self._queue_request if self._can_queue(bubble) else None)
-            if finished and hand is not None:
+            if target is not None:
+                # For an earlier task of the session: the work goes back to it first.
+                self._for_task(target, bubble, said)
+                if side.busy:
+                    side.interrupt()
+            elif finished and hand is not None:
                 hand(bubble, said)
                 if side.busy:
                     side.interrupt()  # those first words were all that was asked of it
@@ -3352,6 +4279,131 @@ class MainWindow(QMainWindow):
             bubble.set_status("")
             bubble.update_text(bubble.raw)
 
+    def _start_kept_task(self) -> None:
+        """Start the first task from the request the quick answer heard as one (_move_on), once that answer is
+        over - the agent goes on from the chat, which then holds it."""
+        if not getattr(self, "_start_when_quiet", False):
+            return
+        if self.side is not None and self.side.busy and self.side.answers:
+            return  # its turn is still ending: _side_turn calls this again
+        self._start_when_quiet = False
+        if self.run is None and self._asked:
+            self.start_task()
+
+    def _more_of_task(self) -> None:
+        """Attachments sent on their own go to the agent as part of the task being worked on."""
+        run = self.run
+        _typed, attachments = self.ask.take()
+        run.messages += 1
+        try:
+            imgs, files = atts.prepare(attachments, run.inputs / "messages" / f"m{run.messages:02d}", "Image",
+                                       new_part_only=self.settings.new_part_only)
+        except OSError as exc:
+            QMessageBox.critical(self, APP_NAME, f"Could not save the attachments:\n{exc}")
+            return
+        count = len(imgs) + len(files)
+        request = self.chat.add("heard", "📎 More of the task", f"*{count} attachment(s)*")
+        self._deliver_to_agent(prompts.more_of_task(run.number), imgs, files, False, heard_bubble=request,
+                               spoken=False)
+        request.set_status(f"· added to task {run.number} - the agent takes it in")
+
+    def _tasks_note(self) -> str:
+        """For the quick answers, in a session of several tasks: which they are and which one is on."""
+        if len(self.tasks) < 2 or self.run is None:
+            return ""
+        return prompts.tasks_note([(t.number, t.title or shorten(" ".join(t.task.split()), 60) or "(from the screenshots)",
+                                    prompts.KIND_LABELS.get(t.kind, t.mode)) for t in self.tasks], self.run.number)
+
+    def _task_for(self, raw: str) -> Run | None:
+        """The earlier task a work request is for (held_task), when it is not the one being worked on."""
+        n = held_task(raw)
+        if 1 <= n <= len(self.tasks) and self.tasks[n - 1] is not self.run:
+            return self.tasks[n - 1]
+        return None
+
+    def _for_task(self, target: Run, bubble: MessageBubble, said: str) -> None:
+        """A work request for another task of the session: the work goes back to that task, then the request
+        is handed on there - once the agent has finished the step it is on."""
+        bubble.passed_on = True
+        if self.main is not None and self.main.busy:
+            if said:
+                bubble.update_text(said)
+                bubble.set_status(f"· for task {target.number} - after his current step")
+            self._pending_switch = (target, lambda: self._hand_over(bubble, said))
+            return
+        self._resume_task(target)
+        self._hand_over(bubble, said)
+
+    def _hand_over(self, bubble: MessageBubble, said: str) -> None:
+        """Pass a work request on to the task now being worked on - or keep it for its Solve."""
+        if self._can_pass_on(bubble):
+            self._pass_on(bubble, said)
+        elif self._can_queue(bubble):
+            self._queue_request(bubble, said)
+        else:
+            bubble.set_markdown(said or "*(no session to pass it to)*")
+            bubble.finish()
+
+    def _run_pending_switch(self) -> None:
+        pending = self._pending_switch
+        if pending is None or self.main is None or self.main.busy:
+            return
+        self._pending_switch = None
+        target, then = pending
+        self._resume_task(target)
+        then()
+
+    def _resume_task(self, run: Run) -> None:
+        """The work goes back to an earlier task of the session: its folder, its instructions, its buttons and
+        its first tab. The task it leaves keeps where it stood and its kept requests, for when it comes back."""
+        old = self.run
+        if run is old or not any(t is run for t in self.tasks):
+            return
+        old.left_phase = self.phase
+        old.kept, self._asked, run.kept = self._asked, list(run.kept), []
+        self._show_asked()
+        # Its folder is worked in again: another task that uses it is kept as it is now, to look at.
+        for task in self.tasks:
+            if task is not run and task.workspace == run.workspace and task.snapshot is None:
+                self._freeze(task)
+        run.snapshot = None
+        self.run, self._viewed = run, None
+        self.plan_view, self.diagram_panel, self.design_view = run.views
+        for stack, view in zip((self.plan_stack, self.diagram_stack, self.notes_stack), run.views):
+            stack.setCurrentWidget(view)
+        title = run.title or shorten(" ".join(run.task.split()), 60) or "the earlier task"
+        run.intro += prompts.back_to_task(run.number, title, prompts.KIND_LABELS.get(run.kind, run.mode),
+                                          str(run.workspace))
+        self._plan_move(run)
+        self._need_instructions(run)
+        self.chat.add("agent", f"↩ Back to task {run.number}", title)
+        self.activity_view.append_markdown(f"---\n\n↩ **Back to task {run.number}** · {title}", spaced=True)
+        phase = run.left_phase if isinstance(run.left_phase, Phase) and run.left_phase not in ACTIVE else (
+            Phase.READY if run.mode == "dsa" else Phase.LISTENING)
+        self._set_phase(phase)
+        self._apply_mode()
+        self._refresh_task_picker()
+        if run.findings:
+            self._build_fix_menu()
+        else:
+            self.fix_menu.clear()
+        self.file_tree.clear()
+        self.code_view.set_code("")
+        self._shown_file = None
+        self.explorer_title.setText(f"EXPLORER  ·  {(run.given or run.workspace).name.upper()}")
+        self.refresh_files()
+        self._show_work_state()
+
+    def _moves_on(self) -> bool:
+        """Does a move to a new task start one by itself (Settings, off by default)? Not in Vibe-Coding, which is
+        a session of its own, and not while one is still being read in."""
+        run = self.run
+        if not self.settings.auto_next_task:
+            return False
+        if run is None:  # no session yet: a task the person sets starts the first one
+            return mode_of(self.mode_combo.currentText()) != "vibe" and not self.task_box.isHidden()
+        return (not run.directing and self.main is not None and self.main.running and self.phase != Phase.WARMING)
+
     def _can_pass_on(self, bubble: MessageBubble) -> bool:
         """Is there a working session to hand this question to (and is it past keeping work for Solve)?"""
         return bool(self.main and self.main.running and self.run and hasattr(bubble, "forward")
@@ -3361,7 +4413,8 @@ class MainWindow(QMainWindow):
         """Is a work request kept rather than passed on: before the task starts, and while a problem's agent has
         only taken it in (it goes with Solve)? Pair Programming and Code Review take each request at once."""
         run = self.run
-        return run is None or (run.mode == "dsa" and self.phase in (Phase.WARMING, Phase.READY))
+        # Auto: until he has judged what kind of task it is (then _deliver_kept, if it takes requests at once).
+        return run is None or (run.mode in ("dsa", "auto") and self.phase in (Phase.WARMING, Phase.READY))
 
     def _pass_on(self, bubble: MessageBubble, said: str) -> None:
         """The quick model judged that this is for the working session: hand it over.
@@ -3470,8 +4523,15 @@ class MainWindow(QMainWindow):
                 return
             if getattr(bubble, "passed_on", False):
                 pass  # already handed to the working session while its first line was coming in
+            elif mark == prompts.NEW_TASK_MARK and self._moves_on():
+                self._move_on(bubble, held_line(bubble.raw, prompts.NEW_TASK_MARK)[0])
+            elif mark == prompts.NEW_TASK_MARK:
+                bubble.set_markdown(held_line(bubble.raw, prompts.NEW_TASK_MARK)[0] or "*(a new task)*")
+                bubble.finish()
             elif mark == prompts.SKIP_MARK:
                 self._drop_skipped(bubble, "· not a question - no answer needed")
+            elif mark == prompts.AGENT_MARK and self._task_for(bubble.raw) is not None:
+                self._for_task(self._task_for(bubble.raw), bubble, held_line(bubble.raw)[0])
             elif mark == prompts.AGENT_MARK and self._can_pass_on(bubble):
                 # A work request, not a question: the quick model passes it on to the coding session.
                 self._pass_on(bubble, held_line(bubble.raw)[0])
@@ -3505,6 +4565,8 @@ class MainWindow(QMainWindow):
                 self._finishing.remove(side)
                 self._end_side(side)
         self._refresh_stop_answer()
+        if getattr(self, "_start_when_quiet", False) and not side.busy:
+            QTimer.singleShot(0, self._start_kept_task)  # a task heard in the chat starts now (_move_on)
 
     def _side_exit(self, side, code: int, stderr: str) -> None:
         if stderr:
@@ -3668,12 +4730,14 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------ files tab
     def refresh_files(self) -> None:
-        """Rebuild the explorer (with each file's status colour) and refresh the open file."""
-        if self.run is None:
+        """Rebuild the explorer (with each file's status colour) and refresh the open file - of the task the tabs
+        show."""
+        run = self._viewed_run()
+        if run is None:
             return
-        files = self._workspace_files()
-        statuses = {rel: self._file_status(rel) for rel in files}
-        self.file_tree.populate(self.run.workspace, files, statuses)
+        files = self._workspace_files(run)
+        statuses = {rel: self._file_status(rel, run) for rel in files}
+        self.file_tree.populate(self._root(run), files, statuses)
         current = self.file_tree.current_file()
         if current is not None:
             self._show_file(current)
@@ -3684,9 +4748,10 @@ class MainWindow(QMainWindow):
             self.file_tree.select(first)  # emits file_selected -> _show_file
 
     def _show_file(self, rel: str) -> None:
-        if not rel or self.run is None:
+        run = self._viewed_run()
+        if not rel or run is None:
             return
-        path = self.run.workspace / rel
+        path = self._root(run) / rel
         self.file_label.setText("  ›  ".join(Path(rel).parts))
         self.file_label.setToolTip(str(path))
         try:
@@ -3702,7 +4767,7 @@ class MainWindow(QMainWindow):
             self._shown_file = None
             self._update_buttons()
             return
-        status = self._file_status(rel)
+        status = self._file_status(rel, run)
         shown = (rel, content_hash(raw), status)
         if self._shown_file == shown:
             return  # unchanged: keep the scroll position and selection
@@ -3714,7 +4779,7 @@ class MainWindow(QMainWindow):
         if status == ORIGINAL:
             untouched = set(range(text.count("\n") + 1))
         elif status == MODIFIED:
-            original = self.run.original_text(file_key(rel, self.run.workspace))
+            original = run.original_text(file_key(rel, self._root(run)))
             if original is not None and text.count("\n") <= 8000:
                 untouched = unchanged_lines(original, text)
         self.code_view.set_code(text, path.name, untouched)

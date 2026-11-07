@@ -30,6 +30,18 @@ does not touch or depend on anything inside the window's own code.
     being recreated by the flag change.
   * Dialogs stay owned by the main window even while it is a Qt.Tool window, which
     Qt 6.12 stopped doing itself: they stay above it and off the taskbar.
+  * Click-through -- the main window lets the mouse through to whatever is under
+    it, so you click, scroll and (once that app has the focus a click gives it)
+    type in the app below while this window stays on screen over it. Win32
+    WS_EX_LAYERED | WS_EX_TRANSPARENT on the main window only: its dialogs stay
+    clickable. Flipped as style bits on the live window, NOT through the Qt
+    WindowTransparentForInput flag, which would go through setWindowFlags and hide
+    and re-show the window (the screen-share rectangle above). Qt rewrites the
+    extended style when the window's flags change and drops the layered bit at
+    100% opacity, so the bits are put back after each of those. Toggled by
+    Ctrl+Alt+Shift+C, Settings, and a Click-through tick box in the status bar,
+    which the remote page shows and ticks like any other box. While it is on, the
+    window cannot be clicked, so the hotkey or the remote page turns it off.
 
 Deliberately NOT attempted: hiding the process from Task Manager. That needs
 rootkit-style kernel/hooking techniques, is blocked on modern Windows, and is
@@ -44,7 +56,7 @@ import sys
 
 import shiboken6
 from PySide6.QtCore import QAbstractNativeEventFilter, QCoreApplication, QEvent, QObject, Qt, QTimer, Signal
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QCheckBox, QMainWindow, QWidget
 
 from .config import Settings
 
@@ -54,13 +66,16 @@ WDA_EXCLUDEFROMCAPTURE = 0x00000011  # absent from captures; Windows 10 2004+
 
 _IS_WIN = sys.platform == "win32"
 
-# Global hotkeys: Ctrl+Alt+Shift+H toggles stealth, Ctrl+Alt+Shift+T toggles always-on-top.
+# Global hotkeys: Ctrl+Alt+Shift+H toggles stealth, Ctrl+Alt+Shift+T always-on-top, Ctrl+Alt+Shift+C click-through.
 _HOTKEY_ID = 0xB0B
 _HOTKEY_TOP_ID = 0xB0C
+_HOTKEY_CLICK_ID = 0xB0D
 _MOD_ALT, _MOD_CONTROL, _MOD_SHIFT, _MOD_NOREPEAT = 0x0001, 0x0002, 0x0004, 0x4000
 _VK_H = 0x48
 _VK_T = 0x54
+_VK_C = 0x43
 _WM_HOTKEY = 0x0312
+CLICK_THROUGH_HOTKEY = "Ctrl+Alt+Shift+C"
 
 if _IS_WIN:
     import ctypes
@@ -90,6 +105,10 @@ if _IS_WIN:
     _user32.SetWinEventHook.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.HMODULE, ctypes.c_void_p,
                                         wintypes.DWORD, wintypes.DWORD, wintypes.DWORD]
     _user32.UnhookWinEvent.argtypes = [wintypes.HANDLE]
+    _user32.SetLayeredWindowAttributes.argtypes = [wintypes.HWND, wintypes.DWORD, wintypes.BYTE, wintypes.DWORD]
+    _user32.SetLayeredWindowAttributes.restype = wintypes.BOOL
+    _user32.RedrawWindow.argtypes = [wintypes.HWND, ctypes.c_void_p, ctypes.c_void_p, wintypes.UINT]
+    _user32.RedrawWindow.restype = wintypes.BOOL
     _WINEVENTPROC = ctypes.WINFUNCTYPE(None, wintypes.HANDLE, wintypes.DWORD, wintypes.HWND, wintypes.LONG,
                                        wintypes.LONG, wintypes.DWORD, wintypes.DWORD)
     _EVENT_OBJECT_SHOW = 0x8002
@@ -100,6 +119,37 @@ if _IS_WIN:
 _GW_OWNER, _GWLP_HWNDPARENT, _GWL_EXSTYLE, _WS_EX_TOPMOST = 4, -8, -20, 0x8
 _HWND_TOP, _HWND_TOPMOST, _HWND_NOTOPMOST = 0, -1, -2
 _SWP_NOSIZE, _SWP_NOMOVE, _SWP_NOACTIVATE = 0x1, 0x2, 0x10
+# Click-through (see _set_click_through).
+_WS_EX_LAYERED, _WS_EX_TRANSPARENT, _LWA_ALPHA = 0x00080000, 0x00000020, 0x2
+_RDW_INVALIDATE, _RDW_ERASE, _RDW_FRAME, _RDW_ALLCHILDREN = 0x1, 0x4, 0x400, 0x80
+
+
+def _set_click_through(hwnd: int, on: bool, qt_layered: bool) -> None:
+    """Let the mouse through the window `hwnd` to whatever is under it, or stop doing so.
+
+    Windows skips a window that is both layered and transparent when it decides what the mouse is over, so the
+    click lands on the window below. The transparent bit alone does not do it. A window below 100% opacity is
+    layered already (Qt makes it so for the opacity); at 100% it is not, and the layered bit is added with
+    full opacity, without which a layered window would not be drawn at all. `qt_layered` says whether Qt
+    wants the window layered for its own sake (its opacity): only a layered bit Qt did not want is removed
+    again when click-through ends."""
+    if not _IS_WIN or not hwnd:
+        return
+    ex = _user32.GetWindowLongW(hwnd, _GWL_EXSTYLE)
+    if on:
+        want = ex | _WS_EX_LAYERED | _WS_EX_TRANSPARENT
+    else:
+        want = ex & ~_WS_EX_TRANSPARENT
+        if not qt_layered:
+            want &= ~_WS_EX_LAYERED
+    if want == ex:
+        return
+    _user32.SetWindowLongPtrW(hwnd, _GWL_EXSTYLE, want)
+    if want & _WS_EX_LAYERED and not ex & _WS_EX_LAYERED:
+        _user32.SetLayeredWindowAttributes(hwnd, 0, 255, _LWA_ALPHA)
+    elif ex & _WS_EX_LAYERED and not want & _WS_EX_LAYERED:
+        # No longer layered: Windows asks the window to paint itself again, make sure all of it is.
+        _user32.RedrawWindow(hwnd, None, None, _RDW_INVALIDATE | _RDW_ERASE | _RDW_FRAME | _RDW_ALLCHILDREN)
 
 
 def _exclude_supported() -> bool:
@@ -178,7 +228,7 @@ class _HotkeyFilter(QAbstractNativeEventFilter):
 
 
 class StealthController(QObject):
-    changed = Signal()  # stealth or always-on-top was toggled (so an open Settings dialog can follow)
+    changed = Signal()  # stealth, always-on-top or click-through was toggled (so open controls can follow)
 
     def __init__(self, app, window, settings: Settings) -> None:
         super().__init__(app)
@@ -186,6 +236,8 @@ class StealthController(QObject):
         self._window = window
         self._on = bool(getattr(settings, "stealth", False))
         self._on_top = bool(getattr(settings, "always_on_top", False))
+        self._click_through = bool(getattr(settings, "click_through", False))
+        self.click_box = None  # the status bar's Click-through box (install_stealth adds it)
         # The window's flags before we touch them, and the last set we applied.
         self._base_flags = int(window.windowFlags())
         self._applied_flags = None
@@ -209,15 +261,22 @@ class StealthController(QObject):
         self._hotkey_filter = _HotkeyFilter({
             _HOTKEY_ID: self.toggle,
             _HOTKEY_TOP_ID: self.toggle_on_top,
+            _HOTKEY_CLICK_ID: self.toggle_click_through,
         })
         app.installNativeEventFilter(self._hotkey_filter)
         self._hotkey_ok = False
         self._hotkey_top_ok = False
+        self._hotkey_click_ok = False
         if _IS_WIN:
             mods = _MOD_CONTROL | _MOD_ALT | _MOD_SHIFT | _MOD_NOREPEAT
             self._hotkey_ok = bool(_user32.RegisterHotKey(None, _HOTKEY_ID, mods, _VK_H))
             self._hotkey_top_ok = bool(_user32.RegisterHotKey(None, _HOTKEY_TOP_ID, mods, _VK_T))
+            self._hotkey_click_ok = bool(_user32.RegisterHotKey(None, _HOTKEY_CLICK_ID, mods, _VK_C))
             app.aboutToQuit.connect(self._cleanup)
+        if self._click_through and not self._hotkey_click_ok:
+            # A window that ignores the mouse, with no hotkey to undo it: start without it rather than leave a
+            # window nothing on this machine can reach. (Settings or the remote page can still switch it on.)
+            self._click_through = False
 
         self._apply(initial=True)
 
@@ -237,10 +296,22 @@ class StealthController(QObject):
     def top_hotkey_registered(self) -> bool:
         return self._hotkey_top_ok
 
+    @property
+    def click_through(self) -> bool:
+        return self._click_through
+
+    @property
+    def click_hotkey_registered(self) -> bool:
+        return self._hotkey_click_ok
+
     def eventFilter(self, obj: QObject, event: QEvent) -> bool:  # noqa: N802 (Qt override)
         if event.type() == QEvent.Type.Show and isinstance(obj, QWidget) and obj.isWindow():
             _apply_affinity(int(obj.winId()), _capture_affinity(self._on))
             self._own(obj)
+            if obj is self._window and self._click_through:
+                # Showing can come with a fresh extended style (a flag change, the opacity put back by its own
+                # Show handler, which runs after this one): set the click-through bits once all that is done.
+                QTimer.singleShot(0, self.refresh_click_through)
             if self._on:
                 # A Qt window often brings a native drop-shadow window with it a tick later; stamp the whole
                 # process's windows on the next turn so the shadow never shows in a capture.
@@ -294,6 +365,33 @@ class StealthController(QObject):
             self._persist()
         self.changed.emit()
 
+    def toggle_click_through(self) -> None:
+        self.set_click_through(not self._click_through, persist=True)
+
+    def set_click_through(self, on: bool, persist: bool = False) -> None:
+        """Let the mouse through the main window to the apps under it (on), or take it back (off). Only style
+        bits change on the window that is on screen: nothing is hidden or rebuilt, so it is safe at any moment,
+        inside an open dialog's loop too, and a screen share sees no change."""
+        on = bool(on)
+        if on == self._click_through:
+            if persist:
+                self._persist()
+            return
+        self._click_through = on
+        self.refresh_click_through()
+        if persist:
+            self._persist()
+        self.changed.emit()
+
+    def refresh_click_through(self) -> None:
+        """Put the click-through bits on the main window as they should be. Qt rewrites the window's extended
+        style when its flags change and drops the layered bit when the opacity reaches 100%, so this is called
+        after each of those (the opacity control calls it after every change)."""
+        w = self._window
+        if not _IS_WIN or not shiboken6.isValid(w) or not w.isVisible():
+            return  # never ask a hidden window for its handle; the Show handler comes back here
+        _set_click_through(int(w.winId()), self._click_through, qt_layered=w.windowOpacity() < 1.0)
+
     def _apply(self, initial: bool = False) -> None:
         w = self._window
         # Compute the window-flag set from the untouched base. Only the window TYPE changes here (Tool =>
@@ -327,7 +425,9 @@ class StealthController(QObject):
                 _apply_affinity(int(w.winId()), _capture_affinity(self._on))
                 w.show()
                 w.raise_()
-                w.activateWindow()
+                if not self._click_through:
+                    # With click-through on, the keyboard belongs to the app under the window: leave it there.
+                    w.activateWindow()
             self._applied_flags = flags
 
         # While stealth is on, use Qt's own file/colour dialogs, not the OS ones: a native dialog is a separate
@@ -351,6 +451,8 @@ class StealthController(QObject):
 
         # Put the window in or out of the always-on-top band, and re-settle its open dialogs.
         self._apply_on_top()
+        # A flag change above rewrote the window's extended style: put the click-through bits back.
+        self.refresh_click_through()
 
     def _apply_on_top(self) -> None:
         """Move the main window into or out of the always-on-top band with a pure z-order change -- no window
@@ -405,9 +507,17 @@ class StealthController(QObject):
             s = Settings.load()
             s.stealth = self._on
             s.always_on_top = self._on_top
+            s.click_through = self._click_through
             s.save()
         except Exception:
             pass
+        # The window keeps its own copy of the settings and saves all of it when something else changes: give
+        # it the new values too, or it would write the old ones back over these.
+        live = getattr(self._window, "settings", None)
+        if isinstance(live, Settings):
+            live.stealth = self._on
+            live.always_on_top = self._on_top
+            live.click_through = self._click_through
 
     def _cleanup(self) -> None:
         if _IS_WIN and self._hotkey_ok:
@@ -416,9 +526,47 @@ class StealthController(QObject):
         if _IS_WIN and self._hotkey_top_ok:
             _user32.UnregisterHotKey(None, _HOTKEY_TOP_ID)
             self._hotkey_top_ok = False
+        if _IS_WIN and self._hotkey_click_ok:
+            _user32.UnregisterHotKey(None, _HOTKEY_CLICK_ID)
+            self._hotkey_click_ok = False
         if _IS_WIN and self._winhook:
             _user32.UnhookWinEvent(self._winhook)
             self._winhook = None
+
+
+def _add_click_through_box(controller: StealthController, window):
+    """The Click-through tick box in the status bar. It switches click-through and follows it when the hotkey
+    or Settings switch it. An ordinary QCheckBox, so the remote page shows it and can tick it: that is the way
+    to switch click-through off from the other machine while this window lets every click through.
+    In the status bar, not the toolbar: the toolbar is full already, here and in the remote page's copy."""
+    bar = window.statusBar() if isinstance(window, QMainWindow) else None
+    if bar is None:
+        return None
+    box = QCheckBox("Click-through")
+    box.setToolTip("Clicks, scrolling and typing go to the apps under this window, which stays on screen over "
+                   "them (best with Always on top). While it is on, this window cannot be clicked: turn it off "
+                   f"with {CLICK_THROUGH_HOTKEY} or from the remote page. Also in Settings.")
+
+    def follow() -> None:
+        on = controller.click_through
+        if box.isChecked() != on:
+            box.setChecked(on)  # signals on: the remote page follows a box by them
+        # While it is on, this window cannot be hovered for the tip: say on the box how to undo it.
+        hint = f" ({CLICK_THROUGH_HOTKEY} to undo)" if on and controller.click_hotkey_registered else ""
+        box.setText("Click-through" + hint)
+        box.setStyleSheet("QCheckBox { color:#e3b341; }" if on else "")
+
+    def clicked(checked: bool) -> None:
+        # clicked, not toggled: only a click (here or from the remote page) switches it, the box following the
+        # hotkey or Settings does not.
+        controller.set_click_through(checked, persist=True)
+        follow()
+
+    box.clicked.connect(clicked)
+    controller.changed.connect(follow)
+    follow()
+    bar.addPermanentWidget(box)
+    return box
 
 
 def install_stealth(app, window) -> StealthController:
@@ -427,4 +575,5 @@ def install_stealth(app, window) -> StealthController:
     dialog can apply changes live."""
     controller = StealthController(app, window, Settings.load())
     app._stealth_controller = controller
+    controller.click_box = _add_click_through_box(controller, window)
     return controller

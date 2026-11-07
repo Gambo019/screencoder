@@ -21,9 +21,13 @@ EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"]
 # "DSA" - a self-contained problem to solve: an algorithm, a SQL query, a function to fix;
 # "Pair Programming" - an existing codebase, changed request by request while he talks it through;
 # "Code Review" - he reviews given code, findings first, then fixes what he is asked to;
-# "Vibe-Coding" - he writes no code himself: he directs a coding agent outside this app.
+# "Vibe-Coding" - he writes no code himself: he directs a coding agent outside this app;
+# "System Design" - no code: he designs a system (leading it step by step) or discusses one, with Mermaid diagrams.
+# "Auto" (the default) - he judges which of the first four a task is, from what was said and shown.
 MODE_DSA, MODE_PAIR, MODE_REVIEW, MODE_VIBE = "DSA", "Pair Programming", "Code Review", "Vibe-Coding"
-MODES = {MODE_DSA: "dsa", MODE_PAIR: "pair", MODE_REVIEW: "review", MODE_VIBE: "vibe"}
+MODE_DESIGN, MODE_AUTO = "System Design", "Auto"
+MODES = {MODE_AUTO: "auto", MODE_DSA: "dsa", MODE_PAIR: "pair", MODE_REVIEW: "review", MODE_DESIGN: "design",
+         MODE_VIBE: "vibe"}
 # The code is written in the language the problem or the codebase is in (prompts.language_note).
 LANG_OTHER = "Other"
 # Where the code really is for the person he talks to (the "Code in" box): he speaks of it that way
@@ -32,8 +36,8 @@ PLACES = ["Local IDE", "Online IDE", "GitHub"]
 
 
 def mode_of(label: str) -> str:
-    """The kind of session a Mode choice means: "dsa", "pair", "review" or "vibe"."""
-    return MODES.get(label, "dsa")
+    """The kind of session a Mode choice means: "auto", "dsa", "pair", "review", "design" or "vibe"."""
+    return MODES.get(label, "auto")
 
 
 TEXT_SCALES = [1.0, 1.15, 1.25, 1.35, 1.5, 1.75, 2.0, 2.5]
@@ -69,8 +73,11 @@ class Settings:
     side_model: str = "claude-opus-4-8"  # measured: first words ~1 s on a warm session, as quick as Sonnet
     side_effort: str = "medium"
     permission_mode: str = "acceptEdits"
-    mode: str = MODE_DSA  # the Mode box (a key of MODES)
+    mode: str = MODE_AUTO  # the Mode box (a key of MODES)
     code_place: str = "Local IDE"  # the "Code in" box (one of PLACES)
+    # When the person moves on to a new task ("next question", "now let's build it"), the session moves on to a
+    # task of its own by itself. Off: "＋ Next task" does it.
+    auto_next_task: bool = False
     # A name for the AI developer (coding agent + quick answers). The person talking to it (the interviewer)
     # may address it by this name; empty means no name. Woven into the system prompt (see prompts.name_note).
     dev_name: str = ""
@@ -85,12 +92,17 @@ class Settings:
     hotkeys_enabled: bool = True
     stealth: bool = False  # hide the window from screen capture, taskbar and Alt+Tab (visible to the user)
     always_on_top: bool = False  # keep the window above all other apps
+    # The mouse goes through the window to the apps under it (they get the clicks, scrolling and typing).
+    click_through: bool = False
     opacity: float = 0.85  # window transparency, 0.2-1.0 (1.0 = fully opaque)
     # Remote control: the window can be seen and driven from a browser on another machine (see remote.py).
     remote_enabled: bool = False
     remote_reach: str = "lan"  # "lan": this machine's network; "internet": a public https link (see tunnel.py)
     remote_port: int = 8765
     remote_key: str = ""  # whoever has it can use the app while remote control is on; made on first use
+    # The remote page may also click, type and scroll on this PC - its whole screen, not only the app. Off by
+    # default: with it on, whoever has the link can use the PC (pc_control.py).
+    remote_pc_control: bool = False
     listen_audio: bool = True
     speech_model: str = "kroko"
     runs_dir: str = str(HOME_DIR / "runs")
@@ -115,7 +127,7 @@ class Settings:
             if key in known and isinstance(value, type(getattr(settings, key))):
                 setattr(settings, key, value)
         if settings.mode not in MODES:
-            settings.mode = MODE_DSA
+            settings.mode = MODE_AUTO
         if settings.code_place not in PLACES:
             settings.code_place = PLACES[0]
         if "mode" not in data:

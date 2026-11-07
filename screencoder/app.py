@@ -3,11 +3,15 @@ from __future__ import annotations
 
 import sys
 
-from PySide6.QtCore import QEvent, QObject, QTimer
+from PySide6.QtCore import QCoreApplication, QEvent, QObject, Qt, QTimer
 from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import QApplication
 
 from .config import APP_NAME
+
+# Qt WebEngine - the offscreen page that draws the Mermaid diagrams (diagram_view.py) - needs this before the
+# application object exists.
+QCoreApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
 
 STYLE = """
 QGroupBox { font-weight: 600; border: 1px solid #30363d; border-radius: 6px; margin-top: 10px; padding-top: 6px; }

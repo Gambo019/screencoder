@@ -52,6 +52,7 @@ from PySide6.QtWidgets import (
 
 from . import tunnel
 from .config import APP_NAME, Settings
+from .pc_control import PCControl
 from .tunnel import Tunnel
 
 DEFAULT_PORT = 8765
@@ -62,6 +63,7 @@ PAGES = {
     "/index.html": ("index.html", "text/html; charset=utf-8"),
     "/app.js": ("app.js", "text/javascript; charset=utf-8"),
     "/app.css": ("app.css", "text/css; charset=utf-8"),
+    "/pc.js": ("pc.js", "text/javascript; charset=utf-8"),  # controlling the PC itself (pc_control.py)
 }
 MAX_HEAD = 16384          # a request head larger than this is not a browser asking for our page
 HEAD_TIMEOUT_MS = 10000   # a connection that has not sent its request by then is dropped
@@ -1866,6 +1868,7 @@ class RemoteController(QObject):
         self.error = ""
         self.internet = False  # reached through the internet link (tunnel.py) instead of this machine's network
         self.mirror = Mirror(app, window, self._broadcast, lambda: self._clients)
+        self.pc = PCControl(self._broadcast, self)  # the PC itself, its whole screen (off unless Settings allow it)
         self.tunnel = Tunnel(self)
         self.tunnel.changed.connect(self.changed)
         app.aboutToQuit.connect(self.stop)
@@ -2069,6 +2072,7 @@ class RemoteController(QObject):
             self.changed.emit()
 
     def _left(self, client) -> None:
+        self.pc.forget(client)
         if client in self._clients:
             self._clients.remove(client)
             client.deleteLater()
@@ -2086,6 +2090,9 @@ class RemoteController(QObject):
         if message[0] == "p":  # a ping: answered at once, it measures the round trip
             client.sendTextMessage(json.dumps(["P", message[1] if len(message) > 1 else 0]))
             client.flush()
+            return
+        if isinstance(message[0], str) and message[0].startswith("pc"):  # the PC itself, not the app
+            self.pc.handle(client, message)
             return
         self.mirror.command(client, message)
 

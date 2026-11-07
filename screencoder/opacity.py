@@ -6,7 +6,9 @@ public `browse_action` / `open_action` attributes to find the toolbar and slot
 the slider in before "Open folder". It does not read or modify the window's own
 code. The slider drives the whole window's opacity (QWidget.setWindowOpacity);
 the value is saved so it persists across launches, and is re-applied after the
-window is rebuilt by a stealth / always-on-top flag change.
+window is rebuilt by a stealth / always-on-top flag change. After each change the
+stealth controller puts its click-through back on the window (see stealth.py):
+at 100% Qt takes the window out of the layered state that click-through needs.
 """
 from __future__ import annotations
 
@@ -26,9 +28,10 @@ def _clamp(op: float) -> float:
 class OpacityToolWidget(QWidget):
     """Label + slider + percent, sized to sit inline on a toolbar."""
 
-    def __init__(self, window) -> None:
+    def __init__(self, window, stealth=None) -> None:
         super().__init__()
         self._window = window
+        self._stealth = stealth  # the StealthController, whose click-through outlasts an opacity change
         self._opacity = _clamp(getattr(Settings.load(), "opacity", 0.85))
 
         lay = QHBoxLayout(self)
@@ -56,6 +59,9 @@ class OpacityToolWidget(QWidget):
         self._pct.setText(f"{pct}%")
         self._opacity = _clamp(pct / 100.0)
         self._window.setWindowOpacity(self._opacity)
+        if self._stealth is not None:
+            # At 100% Qt takes the window out of the layered state that click-through needs: put it back.
+            self._stealth.refresh_click_through()
 
     def _commit(self) -> None:
         try:
@@ -73,9 +79,9 @@ class OpacityToolWidget(QWidget):
 
 def install_opacity(app, window):
     """Insert the opacity slider into the toolbar, right before "Open folder"
-    (i.e. between Browse… and Open folder). Returns the widget, or None if the
-    expected toolbar/actions were not found."""
-    widget = OpacityToolWidget(window)
+    (i.e. between Browse… and Open folder). Returns the widget. Call after install_stealth, so an opacity
+    change can put click-through back."""
+    widget = OpacityToolWidget(window, getattr(app, "_stealth_controller", None))
     open_action = getattr(window, "open_action", None)
     browse_action = getattr(window, "browse_action", None)
     if open_action is not None:

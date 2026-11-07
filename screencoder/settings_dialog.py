@@ -101,6 +101,10 @@ class SettingsDialog(QDialog):
                                         if settings.permission_mode in PERMISSION_MODES else 0)
         self.show_thinking = QCheckBox("Show the coding agent's thinking summaries in the activity log")
         self.show_thinking.setChecked(settings.show_thinking)
+        self.auto_next_task = QCheckBox("Start a task by itself when the person sets one - the first one before "
+                                        "Start, or the next (\"next question\", \"now let's build it\") - off: "
+                                        "Start / ＋ Next task")
+        self.auto_next_task.setChecked(settings.auto_next_task)
         self.hotkeys = QCheckBox("Global screenshot hotkeys (Ctrl+Alt+Shift+S region, Ctrl+Alt+Shift+F full screen)")
         self.hotkeys.setChecked(settings.hotkeys_enabled)
         self.stealth = QCheckBox(
@@ -112,8 +116,15 @@ class SettingsDialog(QDialog):
             "Always on top: keep the window above all other apps (toggle anytime with Ctrl+Alt+Shift+T)"
         )
         self.always_on_top.setChecked(getattr(settings, "always_on_top", False))
-        # Keep these two in step with the real state: the global hotkeys (Ctrl+Alt+Shift+H/T) can flip them
-        # while this dialog is open, and the checkbox should show what is actually in effect.
+        self.click_through = QCheckBox(
+            "Click-through: clicks, scrolling and typing go to the apps under this window, best with Always on top "
+            "(toggle anytime with Ctrl+Alt+Shift+C, or with the Click-through box at the bottom of the window)"
+        )
+        self.click_through.setToolTip("While it is on, this window cannot be clicked: turn it off with "
+                                      "Ctrl+Alt+Shift+C or from the remote page. Its dialogs stay clickable.")
+        self.click_through.setChecked(getattr(settings, "click_through", False))
+        # Keep these in step with the real state: the global hotkeys (Ctrl+Alt+Shift+H/T/C) and the status bar's
+        # Click-through box can flip them while this dialog is open, and each checkbox should show what is in effect.
         self._stealth_controller = getattr(QApplication.instance(), "_stealth_controller", None)
         if self._stealth_controller is not None:
             self._sync_toggles()
@@ -138,6 +149,10 @@ class SettingsDialog(QDialog):
         self._remote_key = getattr(settings, "remote_key", "") or new_key()
         self.remote = QCheckBox("Remote control: see and use this window from a browser on another machine")
         self.remote.setChecked(getattr(settings, "remote_enabled", False))
+        # The whole PC, not only this window: off unless switched on here (pc_control.py).
+        self.remote_pc = QCheckBox("…and control this PC from there: click, type and scroll anywhere on its screen "
+                                   "(the page's PC button) - whoever has the link can then use the PC")
+        self.remote_pc.setChecked(getattr(settings, "remote_pc_control", False))
         self.remote_reach = QComboBox()  # where the other machine is
         self.remote_reach.addItem("from the internet (anywhere, through Cloudflare)", REACH_INTERNET)
         self.remote_reach.addItem("from this network only (same Wi-Fi/LAN)", REACH_LAN)
@@ -197,10 +212,13 @@ class SettingsDialog(QDialog):
         form.addRow("Speech model", self.speech_model)
         form.addRow("", self.listen_audio)
         form.addRow("", self.show_thinking)
+        form.addRow("", self.auto_next_task)
         form.addRow("", self.hotkeys)
         form.addRow("", self.stealth)
         form.addRow("", self.always_on_top)
+        form.addRow("", self.click_through)
         form.addRow("", self.remote)
+        form.addRow("", self.remote_pc)
         form.addRow("Reach it", reach_row)
         form.addRow("Remote link", remote_row)
         form.addRow("", self.remote_status)
@@ -326,10 +344,10 @@ class SettingsDialog(QDialog):
         controller = self._stealth_controller
         if controller is None:
             return
-        for box, state in ((self.stealth, controller.enabled), (self.always_on_top, controller.on_top)):
-            box.blockSignals(True)
+        # Signals left on: nothing here acts on a toggle (Save does), and the remote page follows a box by them.
+        for box, state in ((self.stealth, controller.enabled), (self.always_on_top, controller.on_top),
+                           (self.click_through, controller.click_through)):
             box.setChecked(bool(state))
-            box.blockSignals(False)
 
     def _browse_cli(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Locate the claude executable")
@@ -388,14 +406,17 @@ class SettingsDialog(QDialog):
         s.side_effort = self.side_effort.currentText()
         s.permission_mode = self.permission.currentData()
         s.show_thinking = self.show_thinking.isChecked()
+        s.auto_next_task = self.auto_next_task.isChecked()
         s.hotkeys_enabled = self.hotkeys.isChecked()
         s.stealth = self.stealth.isChecked()
         s.always_on_top = self.always_on_top.isChecked()
+        s.click_through = self.click_through.isChecked()
         s.reading_scale = float(self.text_scale.currentData())
         s.listen_audio = self.listen_audio.isChecked()
         s.speech_model = self.speech_model.currentData()
         s.runs_dir = self.runs_dir.text().strip() or s.runs_dir
         s.remote_enabled = self.remote.isChecked()
+        s.remote_pc_control = self.remote_pc.isChecked()
         s.remote_reach = self.remote_reach.currentData()
         s.remote_port = self.remote_port.value()
         s.remote_key = self._remote_key
@@ -423,3 +444,4 @@ class SettingsDialog(QDialog):
         if controller is not None:
             controller.set_stealth(s.stealth)
             controller.set_on_top(s.always_on_top)
+            controller.set_click_through(s.click_through)

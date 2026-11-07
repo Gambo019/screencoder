@@ -18,6 +18,39 @@ SKIP_MARK = "[skip]"
 # The quick model answers with this, alone, when the request needs the code changed: the app then hands
 # the same message to the coding session instead (which replies in the chat and does the work).
 AGENT_MARK = "[agent]"
+# With "Move on to a new task by itself" on (Settings), the quick model answers with this when the person moves
+# on to another task: the app then starts that task in the working session (main_window._move_on).
+NEW_TASK_MARK = "[new task]"
+
+
+def _move_on_rule(number: int, first: bool = False) -> str:
+    """`first`: no task has started yet - the person setting one starts the first."""
+    if first:
+        return (
+            f"({number}) The person sets you a task to work on - a problem or exercise to solve, a system to "
+            "design, code to review or to work on together, a test - rather than asking you a question: answer "
+            f"with {NEW_TASK_MARK} followed, on the same line, by what you say out loud straight away - two short "
+            "sentences, about twenty words in all - and then stop. The first puts the task in your own words, the "
+            "second says you will take it in (\"Understood - an agent that fixes bug tickets and opens pull "
+            "requests. Let me take the brief in first.\"), in a measured, professional tone. Do not start on it "
+            "here - no questions, no plan, no answer: the task then starts in your working session, which does "
+            "all of that."
+        )
+    return (
+        f"({number}) The person moves on to a new task: they set a new problem, exercise or question of its own - "
+        "often with \"next question\", \"next problem\", \"now let's...\" or with screenshots of something new - or "
+        "they ask for another kind of work than the task you are on (after a design: \"now let's implement it\"; "
+        "after a review: \"let's add a feature\"). That is a new task even when you could answer it at once, such "
+        "as a quiz question: do not answer it here. A question about the current task, your work on it or its "
+        "topic is not a new task, and neither is going back to an earlier task of the session - that is work on "
+        "that task (see the tasks below). For a new task, answer with "
+        f"{NEW_TASK_MARK} followed, on the same line, by what you say out loud straight away - two short sentences, "
+        "about twenty words in all - and then stop. The first puts the new task in your own words, the second says "
+        "you will take it in (\"Understood - next, merging overlapping intervals. Let me read it through.\"), in a "
+        "measured, professional tone. The task then starts in your working session."
+    )
+
+
 # The working session takes a while to answer, so with the marker the quick model also gives what the developer
 # says straight away - two short sentences. The app shows them at once and tells the working session.
 HOLD_LINE = (
@@ -41,9 +74,10 @@ HOLD_LINE = (
 QUEUE_LINE = (
     f"answer with {AGENT_MARK} followed, on the same line, by what you say out loud straight away - two short "
     "sentences, about twenty words in all and never more than thirty - and then stop. The first sentence puts the "
-    "request in your own words; the second says you will build it in when you work out the solution "
-    "('Understood - you'd like the parser to skip blank lines. I'll build that in when I get to the "
-    "solution.'). Worded differently from the last one you used, in a measured, professional tone, with no "
+    "request or the task in your own words; the second says you will take it on when you start ('Understood - "
+    "you'd like the parser to skip blank lines. I'll build that in when I get to the solution.', 'Understood - "
+    "an agent that fixes bug tickets and opens pull requests. I'll work through it once we start.'). Worded "
+    "differently from the last one you used, in a measured, professional tone, with no questions and no "
     "answer, no plan and no code in it: the request is kept and handed on when the solution is written, and "
     "whatever you write after those two sentences is thrown away."
 )
@@ -354,6 +388,15 @@ WARMUP_NOW = {
                "you know it well. Do not review it, explain it or change anything yet: the review is asked for "
                "next.",
                "a careful review of it will take"),
+    "auto": ("Read the task and everything that came with it now, so that you know it well - and work out what "
+             "kind of task it is. Do not start on it, plan it, explain it, review it, draw it or write any file "
+             "yet: what comes next is asked for separately.",
+             "doing it will take"),
+    "design": ("You are going to work on a system design with the person you are talking to. Read the task and "
+               "everything that came with it now - the problem, any diagram or architecture that is shown, the "
+               "constraints - so that you know it well. Do not design, explain or draw anything yet, and write no "
+               "file.",
+               "working this design out will take"),
 }
 
 
@@ -367,33 +410,139 @@ KIND_SCALE = (
 
 
 def warmup_prompt(task: str, inputs: str, workspace: str, workspace_empty: bool, language: str,
-                  asked: str = "", forked: bool = False, mode: str = "dsa") -> str:
+                  asked: str = "", forked: bool = False, mode: str = "dsa", number: int = 1,
+                  earlier: list[tuple[int, str, str, str]] | None = None, instructions: str = "") -> str:
     """The first message of a task: take in the inputs, judge how heavy the work is - and, for a problem, what
     kind of task it is (KIND_SCALE) - and nothing else: what comes next is asked for separately. `asked`: work
     requests made in the chat before the task (asked_note); `forked`: the session continues the chat's
-    conversation (ROLE_CHANGE); `mode`: a key of WARMUP_NOW."""
-    ws_note = "It is empty." if workspace_empty else "It already contains files - read them now as well."
+    conversation (ROLE_CHANGE); `mode`: a key of WARMUP_NOW.
+
+    `number` > 1: a further task of the same session (NEXT_TASK). `earlier`: the tasks before it, as (number,
+    title, what kind of task, folder) - this one may continue one of them, and is then worked on in its folder.
+    `instructions`: the agent's own instructions, when it goes on from the chat's session - whose instructions
+    (those of the quick answers) it would otherwise keep (instructions_note)."""
     role = f"{ROLE_CHANGE}\n\n" if forked else ""
+    if instructions:
+        role += f"[Your instructions as the developer, from here on]\n{instructions.strip()}\n\n"
     now, judged = WARMUP_NOW.get(mode, WARMUP_NOW["dsa"])
-    if mode == "dsa":
-        reply = (f"`{READY_MARK} effort: <level> kind: <kind>`, where <level> is how much thinking {judged} - one of "
-                 f"{EFFORT_SCALE} - and <kind> is what it asks for: {KIND_SCALE}.")
+    title = "and <title> names the task in two to four words"
+    follows = ""
+    if number > 1:
+        follows = (" follows: <n>", f", <n> is the number of the earlier task this one continues - it builds on "
+                   "what you made there: the code you wrote, or the design you drew, which you now build or change "
+                   "- or none")
+    tail, follows_what = follows or ("", "")
+    if mode in ("auto", "design"):
+        tail += " minutes: <m>"
+        follows_what += (", <m> is how many minutes the task has in all - an interview or meeting length, a timer, "
+                         "\"you have 45 minutes\", \"take 20 minutes for this\" - as said or shown anywhere; if "
+                         "nothing says it, 45 for a system design and 30 for anything else")
+    if mode == "auto":
+        reply = (f"`{READY_MARK} effort: <level> kind: <kind>{tail} title: <title>`, where <kind> is what kind of task "
+                 f"it is: {AUTO_KIND_SCALE}; <level> is how much thinking {judged} - for code: {EFFORT_SCALE}; for "
+                 f"a design: {DESIGN_EFFORT_SCALE}{follows_what}; {title}.")
+    elif mode == "dsa":
+        reply = (f"`{READY_MARK} effort: <level> kind: <kind>{tail} title: <title>`, where <level> is how much thinking "
+                 f"{judged} - one of {EFFORT_SCALE} - <kind> is what it asks for: {KIND_SCALE}{follows_what}; {title}.")
+    elif mode == "design":
+        reply = (f"`{READY_MARK} effort: <level> kind: <kind>{tail} title: <title>`, where <level> is how much thinking "
+                 f"{judged} - one of {DESIGN_EFFORT_SCALE} - <kind> is what it asks for: {DESIGN_KIND_SCALE}"
+                 f"{follows_what}; {title}.")
     else:
-        reply = f"`{READY_MARK} effort: <level>`, where <level> is how much thinking {judged} - one of {EFFORT_SCALE}."
+        reply = (f"`{READY_MARK} effort: <level>{tail} title: <title>`, where <level> is how much thinking {judged} - "
+                 f"one of {EFFORT_SCALE}{follows_what}; {title}.")
+    language = "" if mode == "design" else f"# Language\n{language_note(language)}\n\n"
+    if number > 1:
+        listing = "\n".join(f"{n}. {name} ({what}) - folder `{folder}`" for n, name, what, folder in earlier or [])
+        head = (f"[Task {number} - a new task]\nThe task before is over; here is the next one. Everything said and "
+                f"done so far still counts. The tasks so far:\n{listing}\n\n")
+        where = ("Its working directory is decided once you have judged it: the folder of the task it continues, or "
+                 f"a new one. {STAY_INSIDE} The folders of the earlier tasks may be read.")
+    else:
+        head = ""
+        ws_note = "It is empty." if workspace_empty else "It already contains files - read them now as well."
+        where = f"Working directory: `{workspace}`. {ws_note} {STAY_INSIDE}"
     return f"""\
-{role}{_task_header(task, inputs, asked)}
+{role}{head}{_task_header(task, inputs, asked)}
 
-Working directory: `{workspace}`. {ws_note} {STAY_INSIDE}
+{where}
 
-# Language
-{language_note(language)}
-
-{SCREENSHOT_GUIDE}
+{language}{SCREENSHOT_GUIDE}
 
 # Right now: take it all in, and nothing else
 {now}
 
 Reply with exactly one line and nothing else: {reply}"""
+
+
+# Mode "Auto": the warm-up judges which kind of session a task is - mostly from what the person said.
+AUTO_KIND_SCALE = (
+    "code (a self-contained problem that wants code written or fixed: an algorithm, a program, a function, a SQL "
+    "query, a regex), answer (a problem that wants an answer and no code: a multiple-choice question, a short "
+    "written or numeric answer), pair (an existing codebase to change together with the person, request by "
+    "request), review (code, a pull request or a diff to review - findings first), draw (a system to design: you "
+    "work the design out, from the requirements to the architecture) or discuss (a design or an architecture that "
+    "already exists, to be talked about). Go by what the person said they want above all - the task's text, what "
+    "was said in the chat - and by what is shown only where nothing says it"
+)
+KIND_LABELS = {
+    "code": "a problem to solve in code", "answer": "a problem that wants an answer", "pair": "pair programming",
+    "review": "a code review", "draw": "a system to design", "discuss": "a design to discuss",
+}
+
+
+def task_note(number: int, folder: str, continues: str = "") -> str:
+    """The start of a further task's first piece of work: where it is done (the warm-up left that open).
+    `continues`: the earlier task it builds on ("task 1, URL shortener"), whose folder it is."""
+    if continues:
+        where = f"the folder of {continues}, which this task continues - what you made there is in it"
+    else:
+        where = "a new folder of its own"
+    return (f"[Task {number}] Your working directory for this task is `{folder}` - {where}. In everything for this "
+            "task, \"the working directory\" means this folder.\n\n")
+
+
+def instructions_note(note: str, after_design: bool = False) -> str:
+    """How to work on this task (DESIGN_NOTE or place_note), said in the conversation: instructions passed to a
+    session that goes on from another one (a fork) are not taken up - measured: a fork keeps the system prompt
+    of the conversation it was made from. `after_design`: a task with code comes after a design task."""
+    back = ("This task is about code again: what you were told about the whiteboard of the design task no longer "
+            "applies.\n" if after_design else "")
+    return f"[How you work on this task]\n{back}{note.strip()}\n\n"
+
+
+TASK_MARK = "[task"  # "[task 1]": a work request for an earlier task of the session (tasks_note)
+
+
+def tasks_note(tasks: list[tuple[int, str, str]], current: int) -> str:
+    """For the quick model, in a session of several tasks: which there are, which one the work is on now, and how
+    a request for another one is marked - the work then goes back to that task. `tasks`: (number, title, kind)."""
+    listing = "\n".join(f"{n}. {title} ({kind})" + (" - the task you are on now" if n == current else "")
+                        for n, title, kind in tasks)
+    return (f"## The tasks of this session\n{listing}\nA work request about another of these tasks than the one you "
+            f"are on - \"in your diagram for the first task, rename...\", \"back to the DSA problem: solve it\" - is "
+            f"done in that task: put `{TASK_MARK} <number>]` right after the effort, as in `{AGENT_MARK} [low] "
+            f"{TASK_MARK} 1] ...`, and the work goes back to that task. A request about the task you are on needs no "
+            "such mark; a question about any of them you answer yourself.")
+
+
+def back_to_task(number: int, title: str, kind: str, folder: str) -> str:
+    """The start of the first message after the work went back to an earlier task (tasks_note)."""
+    return (f"[Back to task {number}: {title}] The work is on task {number} again - {kind} - until you are told "
+            f"otherwise. Your working directory is `{folder}` again, with what you made there for it; carry on from "
+            "where you left it.\n\n")
+
+
+def more_of_task(number: int) -> str:
+    """Screenshots or files sent on their own while a task is on: they belong to it."""
+    return (f"[More of task {number}] This came with nothing said: it is part of the task you are on - the problem, "
+            "the code or the design it is about. Take it in as such.")
+
+
+def kind_correction(old: str, new: str) -> str:
+    """The user has said what kind of task this really is (the app's override box)."""
+    return (f"[Correction] This task is {KIND_LABELS.get(new, new)}, not {KIND_LABELS.get(old, old)}: from here on, "
+            "work on it as that.\n\n")
 
 
 def work_request_prompt(text: str, said: str = "", unseen: list[str] | None = None, reviewing: bool = False,
@@ -491,6 +640,240 @@ what is fine.
 One or two sentences: how ready it is, and the one thing you would fix first."""
 
 
+# ----------------------------------------------------------------------------- System Design
+# Mode "System Design": no code. He keeps his notes (DESIGN_DOC) and his diagrams (Mermaid files) in his working
+# directory with the Write and Edit tools; the app shows them on its Design notes and Diagram tabs - for the
+# person he talks to, they are the whiteboard. A system to design (kind "draw"): he leads, one step at a time,
+# and each step ends with the one he will take next (NEXT_MARK), which the app puts on its Next button. A
+# design to discuss (kind "discuss"): he answers what he is asked, and changes it when he is asked to.
+DESIGN_DOC = "design.md"
+MAIN_DIAGRAM = "diagram.mmd"
+NEXT_MARK = "[next:"
+NEXT_DONE = "done"
+DESIGN_STEPS = ("Requirements", "Estimates", "API and data model", "High-level design", "Deep dive", "Wrap-up")
+DESIGN_KIND_SCALE = (
+    "draw (a system to design: you work the design out yourself, from the requirements to the architecture - "
+    "\"design a URL shortener\", \"design the news feed\" - also when it builds on a system that is shown) or "
+    "discuss (a design that already exists - a diagram or an architecture that is shown or described - to be "
+    "talked about: how it works, where it breaks, what you would change)"
+)
+DESIGN_EFFORT_SCALE = (
+    "low (a small, familiar system), medium (a standard design at moderate scale), high (large scale or several "
+    "hard parts - most interview designs), xhigh (very large, or hard consistency or real-time demands), max "
+    "(exceptionally hard)"
+)
+
+MERMAID_RULES = """\
+How you draw - each diagram is a Mermaid file of its own, drawn on the board as soon as you write it:
+- The file holds one Mermaid diagram and nothing else - no code fence, no other text - and its first line is a \
+comment with the diagram's name: `%% Architecture`.
+- The architecture: `flowchart LR` (or TB when it reads better), with as many boxes as the time allows - about six \
+to eight in a short session, up to twelve or fourteen in a long one; group them in `subgraph` blocks (tiers, \
+regions) when that helps. Each box has a short id and a quoted label of a few words - \
+`lb["Load balancer"]` - with `<br/>` for a second line: `db[("Orders<br/>PostgreSQL")]`. Shapes: `(["..."])` for \
+clients, `["..."]` for services and gateways, `[("...")]` for databases and storage, `{{"..."}}` for caches, \
+`[["..."]]` for queues and streams. Arrows go the way the request or the data goes, with a short quoted label \
+where it helps - `api -->|"POST /urls"| svc` - and `-.->` for anything asynchronous.
+- Every label in double quotes, with no double quote inside it.
+- What each drawing adds or relabels stands out on the board by itself: mark nothing, and add no styling of your \
+own - no `:::` classes, `style`, `classDef`, `linkStyle` or `%%{init}` lines.
+- A flow where the order of the steps is the point (a request's path, a write, a failover): a `sequenceDiagram` \
+in a file of its own, with at most about seven participants. A data model with more than two entities: an \
+`erDiagram`. No other kinds of diagram; only as many as the time is worth.
+- You draw the way you would at a whiteboard while talking: part by part. Each time, the file holds the whole \
+diagram so far - add the next part with Edit, or write it again with Write - never a fragment of it."""
+
+DESIGN_NOTE = f"""
+
+# A system design task
+This task is about designing a system, not about code: you write no code (an API sketch or a schema only \
+when the design calls for it) and you run nothing. Your whiteboard is a few files in your working directory, \
+written with the Write and Edit tools: `{DESIGN_DOC}` - your notes - and your diagrams as Mermaid files: \
+`{MAIN_DIAGRAM}` for the architecture, and others such as `data-model.mmd` or `write-path.mmd` when they are \
+worth drawing. The person you are talking to sees the diagrams drawn on a whiteboard and your notes beside \
+them: speak of the boxes, the arrows and the parts of the design - never of files, Mermaid, Markdown or your \
+working directory - and say things in your own words rather than reading your notes out.
+
+Your notes are short, the way notes on a whiteboard are: a `# <the system>` title, then only the sections you \
+have got to, in this order - `## Requirements` (functional; non-functional, with numbers; out of scope), \
+`## Estimates`, `## API`, `## Data model`, `## High-level design`, `## Deep dives` (a `###` per topic), \
+`## Trade-offs` - in terse bullets, numbers and short phrases, not prose. Keep them up to date: when the design \
+changes, the notes change with it.
+
+{MERMAID_RULES}"""
+
+DESIGN_SPEECH = (
+    "What you say is shown in the chat as you say it, at the whiteboard: natural spoken sentences, as "
+    + ENGINEER_VOICE + ". No headings, no bullet lists, no bold labels and no code: the details are in your notes "
+    "and on the diagram. Talk to the person you are designing with as \"you\"."
+)
+NEXT_RULE = (
+    f"\n\nEnd with a line of its own naming the step you will take next, in two to five words - `{NEXT_MARK} "
+    f"Estimates]`, `{NEXT_MARK} Deep dive: feed fan-out]` - or `{NEXT_MARK} {NEXT_DONE}]` once the design is "
+    "complete. That line is for the record and is not shown."
+)
+# What each step is about (design_step_prompt), found by words in the step's name.
+STEP_GUIDES = (
+    (("requirement", "scope"),
+     "Pin the scope down before designing anything: the core features (three to five), the qualities that drive "
+     "the design - scale, latency, availability, consistency - with the numbers you assume, and what you leave "
+     "out. Then ask the one to three questions whose answers would change the design most, each with the "
+     "assumption you go with if nobody answers. If a system was shown, build on it. No diagram yet."),
+    (("estimate", "capacity", "envelope"),
+     "The back-of-the-envelope numbers that drive the design: requests per second (average and peak), the "
+     "read/write ratio, storage per year, bandwidth, cache size - each from a stated assumption, rounded, and "
+     "what each number means for the design. No diagram change."),
+    (("api", "data model", "schema"),
+     "The main API calls (method and path or name, the key parameters, what comes back) and the data model: the "
+     "main entities, their key fields, and which store each one goes in and why. Draw the data model (an "
+     "erDiagram in `data-model.mmd`) when it has more than two entities."),
+    (("high level", "high-level", "architecture", "overall"),
+     f"The architecture, in `{MAIN_DIAGRAM}`: build it up the way the main request travels - the clients and the "
+     "entry point first, then the services, then the data stores, caches and queues, then the second main path - "
+     "saying why each part is there as you add it."),
+    (("deep", "dive", "scal", "bottleneck", "fail"),
+     "The part that matters most and has not been gone into yet - the bottleneck at this scale, the hardest "
+     "component, or a failure the system has to survive: how it works in detail, the options, the one you pick "
+     "and why. Add to the architecture where it grows, and draw the flow as a sequenceDiagram when the order of the "
+     "steps is the point and the time is there for it."),
+    (("wrap", "trade", "summary"),
+     "Wrap up: the main trade-offs you made and why, the risks and how you would handle them, and what you would "
+     "do next with more time. Keep it short; the diagram stays as it is unless something changes."),
+)
+
+
+def step_guide(step: str) -> str:
+    name = step.lower()
+    for words, guide in STEP_GUIDES:
+        if any(word in name for word in words):
+            return guide
+    return "Do it the way it is best done at a whiteboard: the substance, the choices you make and why."
+
+
+def light_step(step: str) -> bool:
+    """A step that is said more than worked out (the requirements, the numbers, the wrap-up): at most medium."""
+    return step_guide(step) in (STEP_GUIDES[0][1], STEP_GUIDES[1][1], STEP_GUIDES[5][1])
+
+
+def time_note(minutes: int, gone: int) -> str:
+    """How much time the design has and how much is gone (the app's clock): what the detail is measured by. A
+    design is not scored by its quantity, so how much is drawn follows the time."""
+    left = max(0, minutes - gone)
+    return (f"# Time\nThis design has about {minutes} minutes in all, and about {gone} have gone - some {left} are "
+            "left. A design is not judged by how much is on the board, so fit the detail to the time: in a short "
+            "session one architecture diagram of a few boxes, one deep dive and short steps; in a long one more boxes, "
+            "a flow or a data model where it really helps, and two or three deep dives. When most of the time is "
+            "gone, wrap up. If the person says how long you have, or how long is left, go by that. Leave time for "
+            "the person: what they ask and say is part of the session.")
+
+
+MORE_MARK = "[more:"  # a turn that has drawn one part of several and waits for the person (TALK_AND_DRAW)
+TALK_AND_DRAW = (
+    "Say it and draw it together, one part at a time, the way you would at a whiteboard: say a sentence or two "
+    "about the part - what you are adding and why - then add that part to the diagram with a tool call. Do only "
+    "one part in this turn and then stop: the person needs the time to follow you and draw it too, and tells you "
+    "when to go on. A turn that leaves parts still to draw ends with a line of its own "
+    f"`{MORE_MARK} <the next part, in two to five words>]` - for the record, not shown - and nothing after it: no "
+    "hand-over, no notes yet. A step has two or three parts in a short session, up to five or six in a long one. "
+    "Never draw it all first and explain it after."
+)
+
+
+def design_step_prompt(step: str, first: bool = False, asked: str = "", minutes: int = 45, gone: int = 0) -> str:
+    """System Design, a system to design: he takes his next step himself - nobody asked for it, so it is said as
+    his own move. `step`: the one he named last time (NEXT_MARK); "" lets him choose. `asked`: requests from the
+    chat kept for this moment (asked_note). `minutes`, `gone`: the time (time_note)."""
+    note = f"{asked}\n\n" if asked else ""
+    what = step or "the step you judge matters most now"
+    order = ", ".join(DESIGN_STEPS[:-1]) + f" (as many as the time allows) and {DESIGN_STEPS[-1]}"
+    return f"""\
+{note}[Your own next step - nobody has asked for it]
+You are leading this design session. {"Start it" if first else "Move it on"} with your next step: {what}.
+{step_guide(step)}
+The usual order is {order}, but you choose: skip what is not worth the time, and go where the person wants to go.
+
+{time_note(minutes, gone)}
+
+How you do it:
+1. First, one short spoken sentence of your own that moves the session on - what you are doing now and, in a \
+few words, why: the shape of "Let me <do what> next, since <why>", in your own words each time. It is not a \
+reply to anyone: no "okay", "sure", "great", "right" or "you're right".
+2. Then the substance - the numbers, the choices and why. If this step draws or changes a diagram: \
+{TALK_AND_DRAW} Otherwise just say it, in about 60 to 160 words. {DESIGN_SPEECH}
+3. When the step is complete - a step that draws nothing, or its last part is drawn - end by handing over to the \
+person in a short question or check when there is something for them to confirm or decide.
+4. After that, with tool calls only and no words, update your notes - this step's section - every step, before \
+you stop.
+Then stop: this turn is this one step (or this one part of it) and nothing more. The person answers, asks or \
+moves you on, and the next part or step comes then. A short session means fewer and shorter steps, never several \
+steps in one go.{NEXT_RULE} The {NEXT_MARK} ...] line comes only when the step is complete, not after a part."""
+
+
+def design_part_prompt(part: str, leading: bool = True, minutes: int = 45, gone: int = 0) -> str:
+    """The person is ready for the next part of what he is drawing (TALK_AND_DRAW): he goes on - his own
+    continuation, not a reply. `leading`: he leads the design, so a finished step names the next (NEXT_RULE)."""
+    finish = ("hand over in a short question or check when there is something to confirm or decide, then - tool "
+              "calls only, no words - update your notes" + (f", then give the {NEXT_MARK} ...] line" if leading else ""))
+    return f"""\
+[Go on - the person is ready for the next part]
+Go on with the next part of what you are drawing: {part or "the next part"}. Say a sentence or two about it, then \
+draw it - this part only - and carry straight on from where you stopped: no "okay", "sure" or "right", and no \
+recap of what is drawn already. {DESIGN_SPEECH}
+
+{time_note(minutes, gone)}
+
+If parts are still to come after this one, end with a line of its own `{MORE_MARK} <the next one>]` and stop. If \
+this was the last one, finish instead: {finish}.{NEXT_RULE if leading else ""}"""
+
+
+def design_request_prompt(text: str, said: str = "", leading: bool = True, minutes: int = 45, gone: int = 0) -> str:
+    """A message in a System Design session - a question, or a change to the design. `leading`: he leads this
+    design (a system to design), so he also says what comes next (NEXT_RULE); otherwise (a design to discuss)
+    he only answers, and changes the design when asked to. `minutes`, `gone`: the time (time_note)."""
+    head = ("[The person you are designing with says]" if leading else
+            "[The person you are discussing the design with says]")
+    shown = ("" if leading else " If there is no diagram of the design yet and the change is to the design that "
+             "was shown, first draw that design as it is, without a word, then make the change in it.")
+    return f"""\
+{head}
+{text or "(see the attached images/files)"}
+
+{time_note(minutes, gone)}
+
+{chat_reply(said)} Then, if it asks you to change or add to the design, to draw something, or to go on to a \
+step: do it.{shown} When it changes a diagram, say what you are adding or changing and why, then draw it - and \
+for more than a couple of boxes: {TALK_AND_DRAW} When it is all drawn, update your notes with tool calls only \
+and no words. {DESIGN_SPEECH} If it only asks something about the design - why, how, what if - answer it and \
+change nothing.{NEXT_RULE if leading else ""}{" Leave that line out while parts are still to come." if leading else ""}"""
+
+
+DRAW_EXISTING = f"""\
+[For the record - this is not said to anyone]
+Draw the design you were shown, exactly as it is - no changes and no improvements of your own: its architecture \
+in `{MAIN_DIAGRAM}`, and anything else it shows (a flow, a data model) in a diagram of its own. Also put what it \
+shows into your notes (`{DESIGN_DOC}`), as it is. Tool calls only: write no words at all, and end with exactly \
+{SKIP_MARK}."""
+
+
+def diagram_fix_prompt(errors: dict[str, str]) -> str:
+    """Sent automatically when a diagram he wrote cannot be drawn (Mermaid's parse error)."""
+    listing = "\n".join(f"- `{name}`: {' '.join(error.split())[:600]}" for name, error in errors.items())
+    return f"""\
+[Automatic check by the app - not a message from the user]
+These diagrams cannot be drawn - Mermaid cannot parse them:
+{listing}
+
+Fix them now, keeping what they show - with tool calls only and no words - and then end with exactly \
+{SKIP_MARK}. Mind the rules: every label in double quotes with no double quote inside it, one diagram per file, \
+no code fence."""
+
+
+DESIGN_UNDERSTANDING_SECTION = """\
+## Understanding
+Two to four sentences: what system it is and who uses it for what - or, for a design that is shown, what it \
+does and how a request goes through it - and what makes it hard at this scale."""
+
+
 SECTION_RULES = (
     "Under each heading write a short paragraph of normal sentences: no bullet lists, no tables, no code blocks, "
     "no line-by-line walkthroughs, and no restating of the test cases or examples one by one."
@@ -536,6 +919,9 @@ COPY_JOBS = {
     "approach": ("how you would solve it", "How would you solve it?", APPROACH_SECTIONS),
     "explain": ("how the codebase works", "How does this codebase work?", EXPLAIN_SECTION),
     "howto": ("how you would do the latest request", "How would you do what was just asked?", HOWTO_SECTION),
+    # System Design
+    "grasp": ("your understanding of the design task", "What is your understanding of the design task?",
+              DESIGN_UNDERSTANDING_SECTION),
 }
 
 
@@ -1157,15 +1543,27 @@ def steer_prompt(text: str, said: str = "", unseen: list[str] | None = None) -> 
 {chat_reply(said)} Then carry on with the task, taking the message into account."""
 
 
-def _forward_rule(can_forward: bool, number: int, queue: bool = False) -> str:
+def _forward_rule(can_forward: bool, number: int, queue: bool = False, design: bool = False) -> str:
     """How the quick model treats requests that need the code itself changed. `queue`: no task has started
-    yet, and such a request is kept for it (QUEUE_LINE)."""
+    yet, and such a request is kept for it (QUEUE_LINE). `design`: a System Design session - the work is on
+    the design and its diagrams, not on code."""
+    if design and can_forward and not queue:
+        return (
+            f"({number}) A request to work on the design - change or add to it, draw something, redo a part, go on "
+            "to a step, go deeper into a part: you cannot touch the whiteboard from here, so "
+            f"{HOLD_LINE} The message is then passed to your working session, which gives the full reply and does "
+            "it. Use this only for real requests. Questions about the design (why, how, what if, how it scales, "
+            "what it costs) you answer yourself, and so you do with answers to your questions and new facts about "
+            "the requirements: take them in, in a sentence or two, saying what they change - your working session "
+            "is told."
+        )
     if queue:
         return (
-            f"({number}) A request to do work on the code - write, build, change, add, fix, handle another case, "
-            "add a test, use an approach - that the solution should include: you have not started on the solution "
-            f"yet, so {QUEUE_LINE} Use this only for real work requests; questions (why, how, what "
-            "if, how fast, what would you do) you answer yourself."
+            f"({number}) A task or a request to do work - a problem to solve, a system to design, code to review "
+            "or to work on together, or work on the code: write, build, change, add, fix, handle another case, add "
+            "a test, use an approach - that you will do once you start on it: you have not started yet, so "
+            f"{QUEUE_LINE} Use this only for real work; questions (why, how, what if, how fast, what would you do) "
+            "and a quick question you can answer at once you answer yourself."
         )
     if can_forward:
         return (
@@ -1203,8 +1601,13 @@ def side_prompt(
     briefing: str = "",
     earlier: str = "",
     queue: bool = False,
+    design: bool = False,
+    moves_on: bool = False,
+    tasks: str = "",
 ) -> str:
     """`queue`: no task has started yet (`task` None); a work request is kept for it (_forward_rule).
+    `design`: a System Design session (_forward_rule). `moves_on`: a move to a new task is recognised and
+    started by itself (_move_on_rule).
 
     `given`: `workspace` is the user's own project folder - what the person asking sees - while the coding
     itself happens in a copy the quick model is told nothing about (SIDE_WHERE_GIVEN). `pending` / `landed`
@@ -1244,6 +1647,8 @@ def side_prompt(
                          "moment.")
         else:
             parts.append(f"Where you are right now: {phase}.")
+    if tasks:
+        parts.append(tasks)
     if heard:
         if heard_context:
             parts.append(f"---\n# Earlier audio from the user's PC (for context only)\n{heard_context}")
@@ -1259,14 +1664,17 @@ def side_prompt(
             f"Decide what this is, in this order. (1) Not a question or request for you (cut off, filler, small "
             f"talk, a remark that needs no reply): answer with exactly {SKIP_MARK} and nothing else. It may also "
             "be the rest of something you skipped a moment ago: then put the pieces together and treat the whole "
-            f"thing as one message. {_forward_rule(can_forward, 2, queue)} (3) Otherwise it is a question: answer it as "
+            f"thing as one message. {_move_on_rule(2, task is None) + ' ' if moves_on else ''}"
+            f"{_forward_rule(can_forward, 3 if moves_on else 2, queue, design)} ({4 if moves_on else 3}) Otherwise it "
+            "is a question: answer it as "
             f"the developer doing this work, talking about it as your own: {FIRST_PERSON} Say it the way you "
             "would say it out loud - the direct answer first, then your reasoning in a sentence or two if it "
             "helps. Keep it short, and do not comment on how the question reached you."
         )
     else:
         parts.append(f"---\n# The user's question\n{question or '(see the attached images/files)'}")
-        parts.append(f"{_forward_rule(can_forward, 1, queue)} Otherwise answer as the developer doing this work, the "
+        parts.append(f"{_move_on_rule(1, task is None) + ' ' if moves_on else ''}"
+                     f"{_forward_rule(can_forward, 2 if moves_on else 1, queue, design)} Otherwise answer as the developer doing this work, the "
                      f"way you would say it out loud, and keep it short. {FIRST_PERSON}")
     if attachments:
         parts.append(f"Attached with the question:\n{attachments}")

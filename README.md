@@ -62,11 +62,13 @@ The window has the question-and-answer panel on the left and the code side on th
    While the agent takes the task in, the first tab shows what it is doing and for how long ("is thinking about the task (12 screenshots) · 45s"), then how long it took and the effort it judged solving needs.
 
    Pick the **Mode**, the kind of session. There is no language to pick: the code is always written in the language the problem or the code at hand is in (for a database query, the SQL dialect the problem names, MySQL if none).
-   - **DSA** (the default): a self-contained problem, as on HackerRank, LeetCode or a test platform. The flow below. When it takes the task in, the agent also judges what the task wants:
+   - **Auto** (the default): he judges which of the next four the task is - a problem to solve in code, a problem that wants an answer, pair programming, a code review, a system to design or a design to discuss - going by what was said first (the task's text, the chat) and by what is shown only where nothing says it. Then that flow runs, exactly as if it had been picked. The box beside the work buttons shows what he judged (**DSA - code**, **Code Review**, **System Design - he leads**...); pick another there and he works on the task as that instead (what he was doing is stopped first, and he is told). See [Several tasks in one session](#several-tasks-in-one-session).
+   - **DSA**: a self-contained problem, as on HackerRank, LeetCode or a test platform. The flow below. When it takes the task in, the agent also judges what the task wants:
      - **Code**: an algorithm, a program reading STDIN and printing to STDOUT, a function to complete or fix, a SQL query, a regex, a shell script. **▶ Solve** writes it and checks it on the examples (a query against the example tables in SQLite).
      - **An answer**: a multiple-choice question with one or more right options, or a short written or numeric answer (such as what some code prints). The button reads **▶ Answer**: it names the option(s) exactly as labelled, or gives the answer, in bold, with a sentence or two on why - each question in turn when there are several. It writes no files. Where the answer depends on what code does, it first runs all such code in one go and goes by what it prints, and it settles every answer before writing it. Thinking stays on for answers (it takes only what a question needs): in a test without it, the model put a wrong option in bold and corrected itself a sentence later - code has its test run to catch that, an answer does not. With thinking on, the same three-question quiz was answered right in 11 s (12 s without).
      - For a single quick question, ⚡ **Ask** with a screenshot is faster still: the quick model answers in a few seconds, without a task.
    - **Pair Programming** and **Code Review**: see [Pair Programming](#pair-programming) and [Code Review](#code-review).
+   - **System Design**: no code - he designs a system with you, or discusses a design you show him, with Mermaid diagrams. See [System Design](#system-design).
    - **Vibe-Coding** means the developer writes no code himself: he directs your own coding agent. See [Directing an external coding agent](#directing-an-external-coding-agent-mode-vibe-coding).
 
    Next to it, **Code in** says where the code really is for the person he talks to, so that he speaks of it that way. It is part of the agent's instructions for the whole task (and of every copy's):
@@ -75,10 +77,10 @@ The window has the question-and-answer panel on the left and the code side on th
    - **GitHub**: a repository or a pull request - its files, line numbers, and the change he would make or suggest on a line.
 
    The code itself still comes as screenshots, files or the Workspace folder (nothing is fetched from GitHub). Whatever he does to get it into his own working folder is silent in every mode: for the person he talks to, the code has been in front of him all along.
-2. Press **▶ Start** (Ctrl+Enter). The task box disappears; **＋ New task** in the toolbar starts over for the next problem.
+2. Press **▶ Start** (Ctrl+Enter). The task box disappears; **＋ Next task** in the toolbar goes on to another task with the same agent, and **⟲ New session** starts over from scratch.
    - The agent goes on from the chat so far: everything asked, answered and attached there before Start is part of what it knows.
    - It takes the task in and does nothing else: no plan, no answer, no file. Then it waits, and the first tab says how much effort it judged solving needs.
-   - **＋ New task** asks for confirmation first. On "Yes" it stops the current task if one is running and clears everything on screen: the plan, the prompts, the activity log, the files view, and the whole Q&A panel (transcript, attachments and chat).
+   - **⟲ New session** asks for confirmation first. On "Yes" it stops the agent and clears every task of the session and everything on screen: the plan, the prompts, the activity log, the files view, and the whole Q&A panel (transcript, attachments and chat).
    - It also empties the **Workspace** path, so set it again for the next task.
    - Nothing on disk is deleted: the files in the old workspace and the run folder under `~/ScreenCoder/runs/` stay.
    - **Understanding & plan:** three buttons under it, once the agent has taken the task in.
@@ -122,7 +124,7 @@ The window has the question-and-answer panel on the left and the code side on th
          - The developer says his two sentences straight away ("…I'll build that in when I get to the solution."). The heard bubble is marked "work request - goes to the agent with the task (Start)" or "… with Solve".
          - Before the task, the task box shows "📌 N requests from the chat go to the coding agent with this task". Hover over it to list them, or click **Clear** to drop them. **Start** puts them in the task's first message: what was asked, who asked (said out loud or typed by a teammate) and what the developer answered. Start also works with an empty task box when there are kept requests; they are then the task.
          - After Start, the line beside Solve counts them, and **Solve** puts them in its message, with the screenshots and files that came with them.
-         - **＋ New task** drops them, along with the rest of the chat.
+         - **⟲ New session** drops them, along with the rest of the chat; **＋ Next task** drops them too (they were for the task left behind).
        - Something that is not a question gets no reply.
      - **↪ Send to agent** goes to the coding session as a new instruction. It picks it up right after its current step, replies in the chat with what it will do, and adjusts the code. This needs a running task.
      - **✋ Interrupt & send** is the same as Send to agent, but stops the agent's current step first.
@@ -142,19 +144,37 @@ Every button is enabled only while what it does is possible:
 | **🧪 Run the tests** (Pair Programming) | the agent has taken the project in and is free |
 | **🔍 Get Review** (Code Review) | the review has been written once and the agent is free |
 | **🛠 Fix…** (Code Review) | the review listed findings and the agent is free |
+| **▶ Next** / **🗺 Draw it** (System Design) | he has taken the task in and is free - Next for a system to design, Draw it for a design to discuss |
+| **▶ Go on** (System Design) | he has drawn one part of several and waits for you (the Next button reads this then) |
+| **📋 Copy Mermaid** (Diagram tab) | a diagram is shown |
 | **⚡ Ask** | there is new speech, a selected part of the transcript, or an attachment in the left panel |
 | **↪ Send to agent / developer** | the same, and a task's session is running |
 | **✋ Interrupt & send** | the same, and that session is in the middle of a turn |
 | **■ Stop answer** | a quick answer is being written |
 | **Paste** | the clipboard holds an image, files or text |
 | **Clear** | its box has text or attachments; under the transcript, also when the transcript has speech |
-| **＋ New task** | there is a task or any history to clear |
+| **⟲ New session** | there is a task or any history to clear |
+| **＋ Next task** | a task has been read in and its agent runs (not in Vibe-Coding, which is a session of its own) |
+| the kind box beside the work buttons | the task has been read in |
 | **Workspace** field and **Browse…** | no task has been started yet (the folder is fixed once it runs) |
 | **Open folder** | a task has a workspace, or the typed folder exists |
 | **↻ Refresh** / **📋 Copy code** (Output Code) | a task exists / a file is open |
 | **✋ Interrupt** / **■ Stop** | the session is in the middle of a turn / is running |
 | **✅ Agent finished** / **⏳ Agent still working** | a Vibe-Coding session is running and he has written a prompt |
 | **✔ Sent to the agent** (on each prompt) | it is the newest prompt and has not been marked as sent yet |
+
+## Several tasks in one session
+
+One agent can do one task after another - a design, then building part of it; two DSA problems; a review, then a feature - and it keeps everything from the earlier tasks.
+
+- **＋ Next task** (toolbar) opens the task box again: add the next task (text, screenshots, files), pick its Mode (Auto by default) and Code in, and press **▶ Start task N** (or **Cancel**). If he is in the middle of something, you are asked first, and it is stopped.
+- Or, with **Start a task by itself** on (Settings - off by default): when the person moves on ("next question", "now let's implement it"), the quick answer says so in two sentences and the session moves on to that task by itself, with what was said and attached as the task. The same goes for the first task: a brief heard before Start ("Today you'll design one system...") starts the session by itself, as if Start had been pressed.
+- With the setting off, a task set in the chat before Start (a brief, "review this", a problem) still gets an instant two-sentence reaction - measured 1.1-1.7 s, where answering the whole brief took 10-15 s before the first word - and is kept for **Start**. A quick question is answered as before.
+- He reads the next task in like any task, and also judges whether it **continues** an earlier one (it builds on what he made there - the design he drew, the code he wrote). Such a task is worked on in that task's folder, so the design or code is right there; any other task gets a new folder of its own. With a project folder in Workspace, every task works on that project. Either way he goes on as a copy of himself in the task's folder, with that task's instructions (the whiteboard of a design, or where the code is): all he knew stays.
+- **Going back and forth.** A work request about another task of the session ("in your diagram for the first task, rename the load balancer", "back to the DSA problem - solve it") takes the work back to that task: its folder, its instructions, its buttons and first tab, with a "↩ Back to task N" line in the chat. The task it leaves keeps where it stood - waiting for Solve, its kept requests - for when it comes back. If he is in the middle of a step, the switch waits for it. Questions about any task are answered as usual, and nothing switches.
+- **Screenshots or files with nothing said**, while a task is on, are part of that task ("📎 More of the task"): the problem that was only named when the session moved on, more of the code, the design. They go to the agent, not to the quick answer.
+- **Task** (above the tabs, once there are two): pick any task of the session to see its first tab, Diagram, Design notes and Output Code again - an earlier one as it ended. When a later task went on working in its folder, a copy of that folder as the task ended is kept (`task-N/as-it-ended` in the run folder), and that is what is shown. The work buttons, the chat and the activity log are always for the latest task; the chat and the log mark where each task begins.
+- On disk: the first task is in the run folder as before; task N has `task-N/` beside it, with its inputs and, unless it continues another, its `workspace/`.
 
 ## Pair Programming
 
@@ -190,6 +210,23 @@ For code the developer reviews: a PR, a diff, files or a folder.
    - However a finding gets fixed - from the Fix menu or asked for in the chat ("fix the first bug") - he notes which numbers it dealt with on a line the app reads and never shows. That finding then stays in the Fix menu greyed out with a ✓ (the numbers stay those of the review), *All of them* becomes *All the rest (n)*, and the Review tab gets "✓ Finding 2 fixed.". Once all are fixed, the button is off; 🔍 Get Review starts a fresh list.
    - While he is still reviewing, the quick answers speak of it as going through the code ("I'm still going through the rest of it"), and pass on what they have found so far.
 4. **🔍 Get Review** reviews again (for example after fixes; the Fix menu then lists the new findings); **💡 Get Understanding** explains what the code does, from a copy.
+
+## System Design
+
+For a system design round: no code, a whiteboard. Pick **System Design** (there is no Code in box, and Workspace is not used) and add the question - "Design a URL shortener" - or the diagram or architecture to discuss, as text, screenshots or files. Press **▶ Start**; he reads it in and judges which of two kinds it is:
+
+- **A system to design - he leads.** Straight after the read-in he takes his first step by himself (the requirements), and each step ends with the one he will take next - the **▶ Next** button carries its name ("▶ Next: Estimates"). His usual order is requirements → estimates → API and data model → the high-level design → one to three deep dives → wrap-up, but he chooses, and goes where the person he talks to wants to go.
+  - Each step is his own move, so he says it that way ("Let me put some numbers on this next, since…"), never "okay, sure". He opens with one sentence, then **talks and draws together, one part at a time**, as at a whiteboard: a sentence or two about the part, then that part appears on the diagram - never the whole diagram first and one long explanation after. Then he **waits for you**: the button reads **▶ Go on: <the next part>**, and only your click has him say and draw the next one, so there is time to say it and draw it on the real whiteboard. After the last part he hands over with a question when there is something to confirm, writes up his notes, and the button is **▶ Next: <the next step>** again. A change you ask for that takes several parts goes the same way.
+  - **The time sets the detail.** A design is not scored by how much is on the board, so at the read-in he takes in how long the design has - an interview length, "you have 20 minutes", a timer on a screenshot - or assumes 45 minutes, and every step is told how much of it is gone. A short session gets fewer and shorter steps and a diagram of a few boxes; a long one more boxes, a flow or data model where it helps, and more deep dives; near the end he wraps up. (Measured: 9 boxes in three parts for 20 minutes, 10 in five parts for 60.)
+  - What the person says goes through ⚡ Ask as usual. A question ("why Cassandra?") gets a quick answer, and so does an answer to his questions ("assume 100M links a month") - he takes it in, and his next step builds on it. A request ("skip the estimates", "add a cache for redirects", "go deeper into the ID generation") goes to him: he does it on the board and talks it through.
+  - Steps that are mostly said (requirements, estimates, wrap-up) run at medium effort at most; the architecture and deep dives at the effort he judged the design needs.
+- **A design to discuss - he only answers.** Nothing happens by itself. Questions are answered; a change he is asked for ("how would you remove that single point of failure? put it on the diagram") is made on the board and talked through. **🗺 Draw it** has him draw the design that was shown, as it is, without a word - to look at, and as the base for changes.
+
+The board is two tabs:
+- **Diagram**: his diagrams in Mermaid - the architecture (`flowchart`), and a flow (`sequenceDiagram`) or the data model (`erDiagram`) when they are worth drawing; the box above picks one when there are several. What his latest drawing added or relabelled is outlined in **green** - the app works it out by comparing with the version before, so while he draws part by part the green is always the part he is talking about. The wheel zooms, dragging moves it, a double-click fits it again. **Mermaid** shows the text under it; **📋 Copy Mermaid** copies it (Excalidraw, Miro, draw.io and mermaid.live import it). A diagram that cannot be drawn shows the last version that could, with Mermaid's error - and goes back to him to fix, up to twice.
+- **Design notes**: his notes, whiteboard-style - requirements, estimates, API, data model, high-level design, deep dives, trade-offs - kept up to date as the design changes.
+
+The first new diagram brings the Diagram tab up; after that, a dot on a tab (**Diagram ●**) says it changed while you were elsewhere. The work buttons sit under the tabs in this mode, so ▶ Next is there whichever tab is open. Diagrams are drawn by the Mermaid library bundled with the app (`screencoder/assets/mermaid`, MIT licence) in an offscreen page of Qt WebEngine: nothing is fetched and no diagram leaves the PC, and what is shown is a picture the app paints itself - so it is mirrored to the remote page, and stealth mode hides it like the rest of the window.
 
 ## Directing an external coding agent (Mode: Vibe-Coding)
 
@@ -332,6 +369,21 @@ On the same network the round trip is a few milliseconds. Over the internet it i
 - Sound is not sent; the transcript is.
 - The page needs a wide screen: it is the same layout as the app, and scrolls if the browser window is smaller than the app needs.
 - The folder dialog does not accept a path that runs through a hidden folder (Qt's rule). Type such a path into the Workspace field instead.
+
+### Controlling the PC itself
+
+With **…and control this PC from there** ticked in Settings (under Remote control; **off by default** - with it on, whoever has the link can use the whole PC, not only the app), the page's **PC** button (bottom, beside Window) opens a picture of one of the PC's monitors, and what you do on the picture is done on the PC:
+
+- **Click, right-click, middle-click, double-click** - a click waits 0.3 s for a possible second click, so a double-click arrives as one.
+- **Press, hold, move and let go** (drag a window, select text, draw): the whole gesture is one message - where it was pressed, the path, where it was let go, with its timing - and the PC replays it at the same speed (at most 4 s). Held without moving for 0.6 s or more, it is a long press.
+- **The wheel** (Shift for sideways), and **▲ / ▼** in the bar for a phone.
+- **Keys**: while the picture is open every key goes to the PC - text as typed, Enter, Backspace, arrows, F-keys, and combinations with the modifiers held around the key: Ctrl+Z, Ctrl+Shift+Z, Ctrl+C, Shift+arrows, Ctrl+Alt+T (AltGr still types its character). A key on its own gets its own picture; keys pressed within 0.25 s of each other go together and get one picture at the end. On a phone, the **Type text to send** box (⏎ adds Enter).
+- **Combinations your own browser or computer keeps for itself** (Ctrl+W would close your tab; Alt+Tab, Alt+F4 and the Windows key are your computer's): the **Ctrl / Alt / Shift / Win** buttons in the bar stay down for your next key or click, then let go - Ctrl, then W, is Ctrl+W on the PC. The **Keys…** list sends the common ones in one go: Alt+Tab, Alt+F4, Win, Win+D, Win+E, Win+Tab, Ctrl+W, Ctrl+T, Ctrl+N, Ctrl+Tab, Ctrl+Shift+Esc, Esc, F5, F11, F12, PrtScn. (Ctrl+Alt+Del cannot be sent by any program.)
+- **Monitor buttons** (1 ★, 2) switch monitors; **↻** gets a new picture without doing anything. A red ring shows where the mouse pointer is.
+
+Nothing is streamed: each action gets one new picture of the monitor once the screen has settled (0.35 s), and only the parts of it that changed since your last picture are sent - a click on a button is a few hundred bytes, a whole monitor 45-110 KB at the width your browser shows it (measured on a 1920 × 1080 monitor). Actions sent quicker than they are answered are replayed one after another, and only the last gets a picture.
+
+Limits: windows of programs running as administrator (and the UAC prompt) do not take input from a program that is not, and the lock screen cannot be seen or used. In stealth mode the app itself is not in the pictures, but clicks where it is still reach it.
 
 ## Settings
 

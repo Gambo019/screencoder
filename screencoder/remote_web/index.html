@@ -20,6 +20,32 @@
   </div>
   <div id="mapstage"></div>
 </div>
+<button id="pcbtn" type="button" title="The app's PC itself: see a monitor, and click, type and scroll on it">PC</button>
+<div id="pc" class="hid">
+  <div class="pc-bar">
+    <span id="pcmons"></span>
+    <button id="pcrefresh" type="button" title="A new picture, without doing anything">↻</button>
+    <span id="pcmods" title="Held for your next key or click, then let go - for combinations your own browser or computer keeps for itself (Ctrl+W, Alt+Tab, the Windows key...)"><button type="button" data-m="2">Ctrl</button><button type="button" data-m="4">Alt</button><button type="button" data-m="1">Shift</button><button type="button" data-m="8">Win</button></span>
+    <select id="pckeys" title="Send a key or a combination your own browser or computer would keep for itself">
+      <option value="">Keys…</option>
+      <option value="Tab|4">Alt+Tab</option><option value="F4|4">Alt+F4</option>
+      <option value="Meta|0">Win (Start)</option><option value="d|8">Win+D</option><option value="e|8">Win+E</option>
+      <option value="Tab|8">Win+Tab</option><option value="w|2">Ctrl+W</option><option value="t|2">Ctrl+T</option>
+      <option value="n|2">Ctrl+N</option><option value="Tab|2">Ctrl+Tab</option><option value="Escape|3">Ctrl+Shift+Esc</option>
+      <option value="Escape|0">Esc</option><option value="F5|0">F5</option><option value="F11|0">F11</option>
+      <option value="F12|0">F12</option><option value="PrintScreen|0">PrtScn</option>
+    </select>
+    <button id="pcup" type="button" title="Scroll up where you last clicked">▲</button>
+    <button id="pcdown" type="button" title="Scroll down where you last clicked">▼</button>
+    <form id="pcform"><input id="pctype" type="text" autocomplete="off" placeholder="Type text to send…"
+      title="Typed on the PC as it is - handy on a phone"><label title="Press Enter after the text"><input
+      id="pcenter" type="checkbox">⏎</label><button type="submit">Send</button></form>
+    <span id="pcinfo"></span>
+    <button id="pcx" type="button" title="Close">✕</button>
+  </div>
+  <div id="pcstage"><canvas id="pccanvas" width="16" height="9" tabindex="0"></canvas><div id="pccur"></div></div>
+</div>
 <script src="app.js"></script>
+<script src="pc.js"></script>
 </body>
 </html>

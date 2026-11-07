@@ -100,6 +100,7 @@ function connect() {
 }
 
 function send(message) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(message)); }
+window.scSend = send;  // for pc.js (the PC itself), which lives outside this closure
 
 // Anything the viewer does goes out after what they typed, so the app sees the two in the right order.
 function cmd(message) { flushText(); send(message); }
@@ -135,6 +136,7 @@ function onMessage(ev) {
   else if (m[0] === 'H') gotShots(m[1]);
   else if (m[0] === 'A') { const n = N.get(m[1]); if (n) n.ack = Math.max(n.ack || 0, m[2]); }
   else if (m[0] === 'M') snipAnswer(m[2]);
+  else if (m[0] === 'PC' && window.pcAnswer) window.pcAnswer(m[1]);  // the PC itself: pc.js
 }
 
 function reset() {
@@ -534,6 +536,9 @@ function fit(n) {
   const end = tail ? el.scrollTop + tail.getBoundingClientRect().bottom - viewTop(el) : el.scrollHeight - (n.room || 0);
   const after = n.room ? Math.max(0, el.scrollHeight - n.room - end) : 0;  // what lies below the text: the view's padding
   const room = last ? Math.max(0, Math.ceil(last + el.clientHeight - end - after)) : 0;
+  // With room under it and still not scrolling, the view grows with what it holds: more room would only make it
+  // taller, again and again. (app.css keeps views from doing that; this is the second line of defence.)
+  if (room > (n.room || 0) && n.room && el.scrollHeight <= el.clientHeight + 1) return;
   if (room !== (n.room || 0)) { n.room = room; el.style.setProperty('--room', room + 'px'); }
 }
 

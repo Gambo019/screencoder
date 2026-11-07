@@ -15,6 +15,10 @@ body.stale #root, body.stale #layers { opacity: .45; pointer-events: none; }
    while a single control, a text or a scrolling view gives way. If the page itself is too small, it scrolls. */
 :where(.k-lbl, .k-edit, .k-text, .k-combo, .k-num, .k-prog, .k-rich, .k-code, .k-tree, .k-scroll, .k-canvas) {
   min-width: 0; min-height: 0; }
+/* A scrolling view takes the room the layout gives it, whatever it holds. Without this a long text made the boxes
+   around it as tall as the text (a container is not squeezed below its content), the view stopped scrolling, and the
+   room fit() puts under the text then grew the page without end - millions of pixels, a scroll bar of a few. */
+:where(.k-rich:not(.auto), .k-scroll, .k-code, .k-tree) { contain: size; }
 .hid, .off { display: none !important; }
 
 /* ---- layouts */
@@ -225,6 +229,38 @@ img.k-canvas { display: block; touch-action: none; user-select: none; }
 #hud::before { content: '●'; margin-right: 5px; color: #f85149; }
 #hud.ok::before { color: #3fb950; }
 #hud.bad { bottom: auto; top: 10px; padding: 5px 14px; font-size: 13px; color: var(--text); border-color: #f85149; }
+/* ---- the PC itself (pc.js): a picture of a monitor; what is done on it is done there */
+#pcbtn { position: fixed; left: calc(50% + 122px); bottom: 3px; z-index: 60; padding: 1px 9px; font: inherit;
+  font-size: 11px; color: var(--mid); background: #0d1117d9; border: 1px solid var(--line); border-radius: 10px;
+  cursor: pointer; }
+#pcbtn:hover, #pcbtn.on { color: var(--text); border-color: var(--link); }
+#pc { position: fixed; inset: 0; z-index: 80; display: flex; flex-direction: column; background: #0d1117f5; }
+#pc.hid { display: none; }
+.pc-bar { flex: 0 0 auto; display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 4px 6px;
+  font-size: 12px; border-bottom: 1px solid var(--line); background: var(--window); }
+.pc-bar button, #pcmons button { font: inherit; color: var(--btext); background: var(--button);
+  border: 1px solid #3b424b; border-radius: 3px; padding: 2px 9px; cursor: pointer; }
+.pc-bar button:hover, #pcmons button.on { border-color: var(--link); }
+#pcmons, #pcmods { display: flex; gap: 3px; }
+#pcmods button.on { color: #fff; background: #1f6feb; border-color: #58a6ff; }
+#pckeys { font: inherit; color: var(--btext); background: var(--button); border: 1px solid #3b424b; border-radius: 3px;
+  padding: 2px 4px; }
+#pcform { display: flex; align-items: center; gap: 3px; flex: 1 1 220px; min-width: 0; }
+#pctype { flex: 1 1 auto; min-width: 60px; font: inherit; color: var(--text); background: var(--base);
+  border: 1px solid #3b424b; border-radius: 3px; padding: 2px 6px; }
+#pcform label { display: flex; align-items: center; color: var(--mid); cursor: pointer; }
+#pcinfo { color: var(--mid); white-space: nowrap; font-variant-numeric: tabular-nums; margin-left: auto; }
+#pcinfo.busy { color: #e3b341; }
+#pcinfo.err { color: #f85149; white-space: normal; }
+#pcx { color: var(--mid); background: none !important; border: none !important; font-size: 14px; }
+#pcstage { flex: 1 1 0; min-height: 0; position: relative; display: flex; align-items: center;
+  justify-content: center; overflow: hidden; }
+#pccanvas { touch-action: none; cursor: crosshair; outline: none; image-rendering: auto; background: #000; }
+#pccur { position: absolute; width: 14px; height: 14px; margin: -7px 0 0 -7px; border: 2px solid #ff2d2d;
+  border-radius: 50%; box-shadow: 0 0 4px #000; pointer-events: none; display: none; }
+.pc-tap { position: absolute; width: 22px; height: 22px; margin: -11px 0 0 -11px; border: 2px solid #58a6ff;
+  border-radius: 50%; pointer-events: none; animation: pctap .6s ease-out forwards; }
+@keyframes pctap { to { transform: scale(1.8); opacity: 0; } }
 /* ---- where the app is on its PC: the monitors to scale, the window on them can be dragged and resized */
 #mapbtn { position: fixed; left: calc(50% + 56px); bottom: 3px; z-index: 60; padding: 1px 9px; font: inherit;
   font-size: 11px; color: var(--mid); background: #0d1117d9; border: 1px solid var(--line); border-radius: 10px;
