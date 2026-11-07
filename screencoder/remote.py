@@ -118,6 +118,7 @@ _DRAG = 4  # a whole drag in one message: pressed at one point, let go at anothe
 # What a viewer may ask for. Those in _PASSIVE also work on a widget that is switched off.
 _OPS = frozenset("c t k s e v r a d m x q n b i g y w h file post".split())
 _PASSIVE = frozenset(("q", "a", "file", "y"))
+_SIZED_BY_LAYOUT = frozenset(("rich", "code", "tree", "scroll"))  # scrolling views: their size hint goes along ("ih")
 
 
 def _ptr(obj) -> int:
@@ -155,10 +156,16 @@ def _paints_itself(widget) -> bool:
     return False
 
 
+def _skipped(widget) -> bool:
+    """Not mirrored: scroll bars, grips and the like - and what the app keeps to this machine on purpose (the property
+    remote_skip: the see-through mode's own title bar, see_through.py)."""
+    return isinstance(widget, _SKIP) or bool(widget.property("remote_skip"))
+
+
 def _child_widgets(widget) -> list:
     found = []
     for child in widget.children():
-        if child.isWidgetType() and not child.isWindow() and not isinstance(child, _SKIP) \
+        if child.isWidgetType() and not child.isWindow() and not _skipped(child) \
                 and not child.objectName().startswith("qt_"):
             found.append(child)
     return found
@@ -842,6 +849,12 @@ class Mirror(QObject):
                 props["sep"] = "v"
             elif shape != QFrame.Shape.NoFrame:
                 props["fr"] = 1
+        if node.kind in _SIZED_BY_LAYOUT:
+            # The page sizes a scrolling view by its layout, never by what it holds (app.css: contain: size).
+            # Where the layout leaves the size to the view - a dialog, the strip of attachment thumbnails - it
+            # takes this, what Qt itself would give it.
+            hint = w.sizeHint()
+            props["ih"] = [max(0, hint.width()), max(0, hint.height())]
         getattr(self, "_d_" + node.kind)(node, w, props)
         return props, kids
 
@@ -1191,8 +1204,10 @@ class Mirror(QObject):
         props["rows"] = cache["rows"]
         header = w.header() if isinstance(w, QTreeView) else w.horizontalHeader() if isinstance(w, QTableView) else None
         if header is not None and not header.isHidden():
-            props["hd"] = [str(model.headerData(c, Qt.Orientation.Horizontal) or "")
-                           for c in range(model.columnCount()) if not header.isSectionHidden(c)]
+            shown = [c for c in range(model.columnCount()) if not header.isSectionHidden(c)]
+            props["hd"] = [str(model.headerData(c, Qt.Orientation.Horizontal) or "") for c in shown]
+            # How wide each column is in the app: on the page the first takes what is left, the others these.
+            props["cw"] = [min(400, max(30, header.sectionSize(c))) for c in shown]
 
     def _rows(self, view, model) -> tuple[list, list]:
         rows, index, tree = [], [], isinstance(view, QTreeView)
@@ -1321,7 +1336,7 @@ class Mirror(QObject):
     def _entry(self, node, item, stretch: int, horizontal: bool):
         widget = item.widget()
         if widget is not None:
-            if isinstance(widget, _SKIP):
+            if _skipped(widget):
                 return None
             policy = widget.sizePolicy()
             wide, tall = policy.horizontalPolicy().value, policy.verticalPolicy().value
@@ -1379,7 +1394,7 @@ class Mirror(QObject):
                 r, c, row_span, column_span = layout.getItemPosition(i)
                 widget = item.widget()
                 if widget is not None:
-                    if isinstance(widget, _SKIP):
+                    if _skipped(widget):
                         continue
                     policy = widget.sizePolicy()
                     across, down = policy.horizontalPolicy().value, policy.verticalPolicy().value
@@ -1407,7 +1422,7 @@ class Mirror(QObject):
         items = []
         for i in range(layout.count()):
             widget = layout.itemAt(i).widget()
-            if widget is not None and not isinstance(widget, _SKIP):
+            if widget is not None and not _skipped(widget):
                 items.append([0, self._ref(widget, node), 0, "c", 0])
         spacing = layout.spacing()
         return ["w", spacing if spacing >= 0 else 6, edge, items]
@@ -2075,7 +2090,8 @@ class RemoteController(QObject):
         self.pc.forget(client)
         if client in self._clients:
             self._clients.remove(client)
-            client.deleteLater()
+            if shiboken6.isValid(client):  # at the app's exit, Qt may have deleted it already
+                client.deleteLater()
             if not self._clients:
                 self.mirror.stop()  # nobody is looking: the app runs exactly as without this feature
             self.changed.emit()

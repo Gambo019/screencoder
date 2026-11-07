@@ -390,7 +390,9 @@ class StealthController(QObject):
         w = self._window
         if not _IS_WIN or not shiboken6.isValid(w) or not w.isVisible():
             return  # never ask a hidden window for its handle; the Show handler comes back here
-        _set_click_through(int(w.winId()), self._click_through, qt_layered=w.windowOpacity() < 1.0)
+        # Qt keeps a window layered for its opacity, and always for a see-through background (see_through.py).
+        layered = w.windowOpacity() < 1.0 or w.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        _set_click_through(int(w.winId()), self._click_through, qt_layered=layered)
 
     def _apply(self, initial: bool = False) -> None:
         w = self._window

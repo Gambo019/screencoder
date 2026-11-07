@@ -123,6 +123,14 @@ class SettingsDialog(QDialog):
         self.click_through.setToolTip("While it is on, this window cannot be clicked: turn it off with "
                                       "Ctrl+Alt+Shift+C or from the remote page. Its dialogs stay clickable.")
         self.click_through.setChecked(getattr(settings, "click_through", False))
+        self.see_through = QCheckBox(
+            "See-through: the window's backgrounds show what is behind it - only text, borders, buttons and "
+            "pictures stay (also the See-through box at the bottom of the window, with its Backdrop slider)")
+        self.see_through.setToolTip("The text gets a dark edge, so it reads over a white, grey or black desktop. "
+                                    "The window keeps the mouse everywhere on it, and has a title bar of its own: "
+                                    "drag it to move, double-click to maximise, drag an edge to resize.")
+        live = getattr(QApplication.instance(), "_see_through", None)
+        self.see_through.setChecked(live.on if live is not None else getattr(settings, "see_through", False))
         # Keep these in step with the real state: the global hotkeys (Ctrl+Alt+Shift+H/T/C) and the status bar's
         # Click-through box can flip them while this dialog is open, and each checkbox should show what is in effect.
         self._stealth_controller = getattr(QApplication.instance(), "_stealth_controller", None)
@@ -217,6 +225,7 @@ class SettingsDialog(QDialog):
         form.addRow("", self.stealth)
         form.addRow("", self.always_on_top)
         form.addRow("", self.click_through)
+        form.addRow("", self.see_through)
         form.addRow("", self.remote)
         form.addRow("", self.remote_pc)
         form.addRow("Reach it", reach_row)
@@ -411,6 +420,7 @@ class SettingsDialog(QDialog):
         s.stealth = self.stealth.isChecked()
         s.always_on_top = self.always_on_top.isChecked()
         s.click_through = self.click_through.isChecked()
+        s.see_through = self.see_through.isChecked()
         s.reading_scale = float(self.text_scale.currentData())
         s.listen_audio = self.listen_audio.isChecked()
         s.speech_model = self.speech_model.currentData()
@@ -445,3 +455,6 @@ class SettingsDialog(QDialog):
             controller.set_stealth(s.stealth)
             controller.set_on_top(s.always_on_top)
             controller.set_click_through(s.click_through)
+        see_through = getattr(QApplication.instance(), "_see_through", None)
+        if see_through is not None:
+            see_through.set(s.see_through)

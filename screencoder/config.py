@@ -95,6 +95,10 @@ class Settings:
     # The mouse goes through the window to the apps under it (they get the clicks, scrolling and typing).
     click_through: bool = False
     opacity: float = 0.85  # window transparency, 0.2-1.0 (1.0 = fully opaque)
+    # The window's backgrounds are transparent - only text, borders, buttons and pictures stay, the text with a dark
+    # edge - over an even tint of this darkness, 0-0.9 (see_through.py).
+    see_through: bool = False
+    see_through_backdrop: float = 0.35
     # Remote control: the window can be seen and driven from a browser on another machine (see remote.py).
     remote_enabled: bool = False
     remote_reach: str = "lan"  # "lan": this machine's network; "internet": a public https link (see tunnel.py)

@@ -166,7 +166,7 @@ input[type=number].w { width: 90px; }
   border-bottom: 1px solid var(--line); }
 .k-tree .tw { flex: 0 0 12px; margin-right: -8px; text-align: center; color: var(--mid); cursor: pointer; }
 .k-tree .cell { overflow: hidden; text-overflow: ellipsis; }
-.k-tree .cell:first-of-type { flex: 1 1 auto; }
+.k-tree .cell.c0 { flex: 1 1 auto; min-width: 0; }  /* the first column takes what the others leave */
 
 /* ---- other windows of the app: dialogs, menus, self-painted overlays */
 #layers:empty { display: none; }

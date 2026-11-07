@@ -95,7 +95,10 @@ def main() -> int:
     from .remote import install_remote
     from .stealth import install_stealth
 
+    from .see_through import install_see_through
+
     install_stealth(app, window)
     install_opacity(app, window)
+    install_see_through(app, window)  # after stealth: its frameless flag goes through stealth's window flags
     install_remote(app, window)
     return app.exec()

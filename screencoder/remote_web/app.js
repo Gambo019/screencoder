@@ -306,6 +306,9 @@ function update(n, keys) {
   if (has('ff')) s.fontFamily = p.ff ? `'${p.ff}', ${MONO.test(p.ff) ? 'monospace' : 'system-ui, sans-serif'}` : '';
   if (has('mn')) { s.minWidth = p.mn && p.mn[0] ? p.mn[0] + 'px' : ''; s.minHeight = p.mn && p.mn[1] ? p.mn[1] + 'px' : ''; }
   if (has('mx')) { s.maxWidth = p.mx && p.mx[0] ? p.mx[0] + 'px' : ''; s.maxHeight = p.mx && p.mx[1] ? p.mx[1] + 'px' : ''; }
+  // A scrolling view is sized by its layout, not by what it holds (app.css); where the layout leaves its size to
+  // it, it takes the size Qt would give it.
+  if (has('ih')) s.containIntrinsicSize = p.ih ? `${p.ih[0]}px ${p.ih[1]}px` : '';
   if (has('ss')) sheet(n);  // after the sizes and fonts: what the widget styles itself has the last word
   KIND[n.k].upd(n, p, has, keys);
   if (has('sy') || has('sm') || has('vw') || has('end') || has('html')) n.again = true;
@@ -1013,13 +1016,15 @@ const KIND = {
       return el;
     },
     upd(n, p, has) {
-      if (!has('rows') && !has('hd')) return;
-      let out = p.hd ? '<div class="hdr">' + p.hd.map(t => `<span class="cell">${esc(t)}</span>`).join('') + '</div>' : '';
+      if (!has('rows') && !has('hd') && !has('cw')) return;
+      // Columns as wide as in the app (the first takes what is left), so the rows line up under the header.
+      const width = j => j && p.cw && p.cw[j] ? ` style="flex:0 0 ${p.cw[j]}px"` : '';
+      let out = p.hd ? '<div class="hdr">' + p.hd.map((t, j) => `<span class="cell${j ? '' : ' c0'}"${width(j)}>${esc(t)}</span>`).join('') + '</div>' : '';
       (p.rows || []).forEach((r, i) => {
         const f = r[1];
         out += `<div class="row${f & 4 ? ' sel' : ''}${f & 8 ? ' dis' : ''}${f & 1 ? ' par' : ''}" data-i="${i}" ` +
           `style="padding-left:${6 + r[0] * 14}px"><span class="tw">${f & 1 ? (f & 2 ? '▾' : '▸') : ''}</span>` +
-          r[2].map((t, j) => `<span class="cell"${r[3] && r[3][j] ? ` style="color:${esc(r[3][j])}"` : ''}>${esc(t)}</span>`).join('') +
+          r[2].map((t, j) => `<span class="cell${j ? '' : ' c0'}"${r[3] && r[3][j] ? ` style="color:${esc(r[3][j])}${j && p.cw && p.cw[j] ? `;flex:0 0 ${p.cw[j]}px` : ''}"` : width(j)}>${esc(t)}</span>`).join('') +
           '</div>';
       });
       n.el.innerHTML = out;
