@@ -7,9 +7,10 @@ its native frame - so in this mode the window has a title bar of its own (drag t
 maximise; – and ×), and is resized from a thin rim along its edges. Over the backgrounds lies one even dark
 tint, the Backdrop (the slider beside the tick box, 0-90%): never quite 0, so every pixel stays this window's and
 the mouse never falls through a gap (it did with a colour key: the toolbar's >> popup closed on the way to its
-buttons). The text views' text gets a tight dark glow, two layers deep, so it can be read over a white, grey or
-black desktop alike; the glow is put on each text view, where it costs ~15 ms per update of that view (on the whole
-window at once it cost 55 ms per update - measured).
+buttons). Text gets a crisp dark outline (Outline), so it can be read over a white, grey or black desktop alike:
+on each text view's viewport, on the bars as a whole, on each label, tick box and input box elsewhere - never on a
+large part of the window at once (a blurred glow on the whole content cost 55 ms per update, measured), and never
+one inside another. Soft blurred glows were the first try: too faint over white at 85% opacity.
 
 Built from the outside, like stealth.py and opacity.py: style sheets of the main window's widgets are rewritten
 while it is on (and put back after); the frameless flag goes through the stealth controller, which rebuilds the
@@ -19,11 +20,11 @@ from __future__ import annotations
 import re
 
 import shiboken6
-from PySide6.QtCore import QEvent, QObject, QPoint, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QCursor, QPainter
+from PySide6.QtCore import QEvent, QObject, QPoint, QRectF, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QCursor, QPainter, QPixmap, QTransform
 from PySide6.QtWidgets import (
-    QAbstractScrollArea, QApplication, QCheckBox, QGraphicsDropShadowEffect, QHBoxLayout, QLabel, QMainWindow,
-    QPushButton, QSlider, QWidget,
+    QAbstractScrollArea, QAbstractSpinBox, QApplication, QCheckBox, QComboBox, QGraphicsEffect, QHBoxLayout, QLabel,
+    QLineEdit, QMainWindow, QPushButton, QRadioButton, QSlider, QStatusBar, QToolBar, QWidget,
 )
 
 from .config import Settings
@@ -32,7 +33,8 @@ BACKDROP_RGB = (13, 17, 23)  # the app's darkest background
 MIN_ALPHA = 3                # out of 255: looks clear, still catches the mouse
 DEFAULT_BACKDROP = 0.35
 MAX_BACKDROP = 0.9
-GLOW_RADIUS = 3.0            # two of these, one in the other: a tight dark edge around the text
+# The outline: rings of (distance in px, darkness 0-255) - solid black right at the letters, softer just outside.
+RINGS = ((2, 120), (1, 255))
 EDGE = 5                     # px of rim along the window's edges, to resize it by
 _CURSORS = {
     Qt.Edge.LeftEdge: Qt.CursorShape.SizeHorCursor, Qt.Edge.RightEdge: Qt.CursorShape.SizeHorCursor,
@@ -45,7 +47,9 @@ _KEEP = re.compile(r":(hover|pressed|checked|selected|focus|disabled)|::(handle|
 _BACKGROUND = re.compile(r"(?<![-\w])background(?:-color)?\s*:\s*[^;}]+")
 _CLEAR = ("QTabWidget::pane { background: transparent; border: 1px solid #30363d; } "
           "QStatusBar, QToolBar, QTextBrowser, QPlainTextEdit, QTextEdit, QListWidget, QTreeWidget, QTreeView, "
-          "QListView, QScrollArea, QFrame#approval { background: transparent; } QToolBar { border: none; }")
+          "QListView, QScrollArea, QFrame#approval { background: transparent; } QToolBar { border: none; } "
+          # A group's title sits on its frame, where no outline goes (the group holds whole views): a dark chip.
+          "QGroupBox::title { background: rgba(13, 17, 23, 200); border-radius: 3px; }")
 
 
 def blank(sheet: str, colour: str = "transparent") -> str:
@@ -61,17 +65,51 @@ def blank(sheet: str, colour: str = "transparent") -> str:
     return "}".join(rules)
 
 
-def _glow(widget: QWidget) -> None:
-    effect = QGraphicsDropShadowEffect(widget)
-    effect.setOffset(0, 0)
-    effect.setBlurRadius(GLOW_RADIUS)
-    effect.setColor(QColor(0, 0, 0, 255))
-    widget.setGraphicsEffect(effect)
+class Outline(QGraphicsEffect):
+    """A dark outline around all a widget paints - its text above all: what it painted, in black, laid around it
+    one and two pixels out, then the widget's own picture on top."""
+
+    PAD = max(r for r, _ in RINGS)
+
+    def boundingRectFor(self, rect: QRectF) -> QRectF:  # noqa: N802 (Qt override)
+        return rect.adjusted(-self.PAD, -self.PAD, self.PAD, self.PAD)
+
+    def draw(self, painter: QPainter) -> None:
+        offset = QPoint()  # PySide fills it in: where the picture goes, in device pixels
+        pixmap = self.sourcePixmap(Qt.CoordinateSystem.DeviceCoordinates, offset,
+                                   QGraphicsEffect.PixmapPadMode.PadToEffectiveBoundingRect)
+        if pixmap.isNull():
+            return
+        dark = QPixmap(pixmap.size())
+        dark.setDevicePixelRatio(pixmap.devicePixelRatio())
+        dark.fill(Qt.GlobalColor.transparent)
+        p = QPainter(dark)
+        p.drawPixmap(0, 0, pixmap)
+        p.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
+        p.fillRect(dark.rect(), Qt.GlobalColor.black)
+        p.end()
+        world = painter.worldTransform()
+        painter.setWorldTransform(QTransform())
+        for radius, darkness in RINGS:
+            painter.setOpacity(darkness / 255)
+            for dx in (-radius, 0, radius):
+                for dy in (-radius, 0, radius):
+                    if dx or dy:
+                        painter.drawPixmap(offset.x() + dx, offset.y() + dy, dark)
+        painter.setOpacity(1.0)
+        painter.drawPixmap(offset, pixmap)
+        painter.setWorldTransform(world)
+
+
+# What gets an outline of its own: the bars as a whole (small, seldom repainted), each text view's viewport, and
+# each label, tick box and input box that is in none of those.
+_BARS = (QToolBar, QStatusBar)
+_SMALL = (QLabel, QCheckBox, QRadioButton, QLineEdit, QComboBox, QAbstractSpinBox)
 
 
 class TitleBar(QWidget):
-    """The window's own title bar while it has no native frame: drag it to move the window (Windows snaps it as
-    usual), double-click or □ to maximise, – and ×. Kept off the remote page (remote_skip)."""
+    """The window's own title bar while it has no native frame: drag it to move the window,
+    double-click or □ to maximise, – and ×. Kept off the remote page (remote_skip)."""
 
     def __init__(self, window: QMainWindow) -> None:
         super().__init__()
@@ -140,7 +178,7 @@ class SeeThrough(QObject):
         settings = Settings.load()
         self.backdrop = min(MAX_BACKDROP, max(0.0, float(getattr(settings, "see_through_backdrop", DEFAULT_BACKDROP))))
         self._globals: dict = {}
-        self._glowing: list = []  # widgets given a glow, to take it off again
+        self._outlined: list = []  # widgets given an outline, to take it off again
         self.title_bar: TitleBar | None = None
         self._edges = Qt.Edge(0)
         self._cursor_set = False
@@ -149,7 +187,10 @@ class SeeThrough(QObject):
         self._hover.timeout.connect(self._edge_cursor)
         self._pending: list = []  # widgets made or restyled while it is on, looked at on the next turn
         self._margins = None
+        self._no_background = False
         app.installEventFilter(self)
+        # At the app's end the window is torn down while events still pass here: stop looking at them first.
+        app.aboutToQuit.connect(lambda: app.removeEventFilter(self))
 
     @property
     def on(self) -> bool:
@@ -167,7 +208,7 @@ class SeeThrough(QObject):
         self._on = on
         self._frame(on)
         self._colours(on)
-        self._glows(on)
+        self._outlines(on)
         if on:
             self._hover.start()
         else:
@@ -199,7 +240,13 @@ class SeeThrough(QObject):
         was_max = w.isMaximized()
         if was_max:
             w.showNormal()
+        if on:
+            self._no_background = w.testAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
         w.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, on)
+        if not on:
+            # Qt switched the window's own background off with the translucency, and does not switch it back on:
+            # without it, the window drew over its old picture.
+            w.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, self._no_background)
         stealth = getattr(self._app, "_stealth_controller", None)
         if stealth is not None:
             # Stealth rebuilds the window from these flags whenever it switches anything: it has to know.
@@ -212,6 +259,10 @@ class SeeThrough(QObject):
                              else (flags & ~Qt.WindowType.FramelessWindowHint))
             w.restoreGeometry(geometry)
             w.show()
+        from .stealth import reset_layering
+        reset_layering(w)
+        if stealth is not None:
+            stealth.refresh_click_through()  # the layered bit was taken off and on: click-through's bit with it
         if on:
             # A rim of the window's own (tinted) pixels all round: what is pressed there resizes it, and the
             # scroll bars along the sides stay theirs.
@@ -281,36 +332,43 @@ class SeeThrough(QObject):
         w.setProperty("_see_original", None)
         w.setProperty("_see_blank", None)
 
-    # ---- the glow on the text
+    # ---- the outline on the text
 
-    def _glows(self, on: bool) -> None:
+    def _outlines(self, on: bool) -> None:
         if on:
-            for view in self._window.findChildren(QAbstractScrollArea):
-                self._glow_view(view)
+            for w in self._window.findChildren(QWidget):  # parents before their children
+                self._outline(w)
         else:
-            for widget in self._glowing:
-                if shiboken6.isValid(widget):
+            for widget in self._outlined:
+                if shiboken6.isValid(widget) and isinstance(widget.graphicsEffect(), Outline):
                     widget.setGraphicsEffect(None)
-            self._glowing = []
+            self._outlined = []
 
-    def _glow_view(self, view: QAbstractScrollArea) -> None:
-        """Two glows, the view's and its viewport's: one alone is too faint over white (measured). Not for a view
-        inside a view that has them (the chat's bubbles): theirs would stack up and cost again."""
-        if not shiboken6.isValid(view) or view.graphicsEffect() is not None:
+    def _outline(self, w: QWidget) -> None:
+        """Give `w` (or, for a text view, its viewport) an outline - unless it is in something outlined already:
+        one inside another would only cost twice."""
+        if not shiboken6.isValid(w):
             return
-        parent = view.parentWidget()
+        if isinstance(w, QAbstractScrollArea):
+            target = w.viewport()
+        elif isinstance(w, _BARS + _SMALL + (TitleBar,)):
+            target = w
+        else:
+            return
+        if target is None or target.graphicsEffect() is not None:
+            return
+        parent = w.parentWidget()
         while parent is not None and parent is not self._window:
-            if isinstance(parent, QAbstractScrollArea) and parent.graphicsEffect() is not None:
+            if isinstance(parent.graphicsEffect(), Outline):
                 return
             parent = parent.parentWidget()
-        _glow(view)
-        _glow(view.viewport())
-        self._glowing += [view, view.viewport()]
+        target.setGraphicsEffect(Outline(target))
+        self._outlined.append(target)
 
     # ---- events: new widgets, and resizing from the edges
 
     def eventFilter(self, obj: QObject, event: QEvent) -> bool:  # noqa: N802 (Qt override)
-        if not self._on:
+        if not self._on or not shiboken6.isValid(self._window):
             return False
         kind = event.type()
         if kind == QEvent.Type.Paint and obj is self._window:
@@ -347,8 +405,7 @@ class SeeThrough(QObject):
                 continue
             seen.add(id(w))
             self._blank(w)
-            if isinstance(w, QAbstractScrollArea):
-                self._glow_view(w)
+            self._outline(w)
 
     def _edges_at(self, pos: QPoint) -> Qt.Edge:
         w = self._window

@@ -152,6 +152,23 @@ def _set_click_through(hwnd: int, on: bool, qt_layered: bool) -> None:
         _user32.RedrawWindow(hwnd, None, None, _RDW_INVALIDATE | _RDW_ERASE | _RDW_FRAME | _RDW_ALLCHILDREN)
 
 
+def reset_layering(window) -> None:
+    """Make Windows forget how `window` was layered, and let Qt layer it again the way it needs now. A window once
+    layered for its opacity as a whole (SetLayeredWindowAttributes) can no longer be drawn per pixel
+    (UpdateLayeredWindow fails until the layered bit is taken off and put back): switched to see-through, it drew
+    nothing at all. Called after the window's frame or translucency changes (see_through.py)."""
+    if not _IS_WIN or not shiboken6.isValid(window) or not window.isVisible():
+        return
+    hwnd = int(window.winId())
+    ex = _user32.GetWindowLongW(hwnd, _GWL_EXSTYLE)
+    if ex & _WS_EX_LAYERED:
+        _user32.SetWindowLongPtrW(hwnd, _GWL_EXSTYLE, ex & ~_WS_EX_LAYERED)
+    opacity = window.windowOpacity()
+    window.setWindowOpacity(1.0 if opacity < 1.0 else 0.99)  # a change, so Qt does its layering again
+    window.setWindowOpacity(opacity)
+    window.update()  # all of it drawn again, the new way
+
+
 def _exclude_supported() -> bool:
     if not _IS_WIN:
         return False

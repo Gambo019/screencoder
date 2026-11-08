@@ -1,6 +1,8 @@
 """Screen capture: snipping-tool style region selection and full-screen grabs."""
 from __future__ import annotations
 
+import shiboken6
+
 from PySide6.QtCore import QObject, QPoint, QRect, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QCursor, QGuiApplication, QImage, QPainter, QPen, QPixmap, QRegion
 from PySide6.QtWidgets import QApplication, QWidget
@@ -126,8 +128,9 @@ class ScreenCapturer(QObject):
             return
         self._busy, self._target = True, target
         # Opacity 0 (instead of hide()) keeps window position, z-order and focus untouched.
-        self._faded = [w for w in QApplication.topLevelWidgets() if w.isVisible() and not isinstance(w, SnipOverlay)]
-        for w in self._faded:
+        self._faded = [(w, w.windowOpacity()) for w in QApplication.topLevelWidgets()
+                       if w.isVisible() and not isinstance(w, SnipOverlay)]
+        for w, _opacity in self._faded:
             w.setWindowOpacity(0.0)
         QTimer.singleShot(200, lambda: self._grab(mode, screen))
 
@@ -161,9 +164,15 @@ class ScreenCapturer(QObject):
             overlay.close()
             overlay.deleteLater()
         self._overlays = []
-        for w in self._faded:
-            w.setWindowOpacity(1.0)
+        for w, opacity in self._faded:
+            if shiboken6.isValid(w):
+                w.setWindowOpacity(opacity)  # each as it was: the main window has its opacity slider's
         self._faded = []
+        # Qt redoes the main window's layering for an opacity change (at 100% it takes it away), and with it the
+        # bit click-through needs: without this, after a screenshot the mouse no longer went through.
+        stealth = getattr(QApplication.instance(), "_stealth_controller", None)
+        if stealth is not None:
+            stealth.refresh_click_through()
         self._busy = False
         if img is not None and not img.isNull():
             self.captured.emit(img, self._target)
