@@ -43,6 +43,7 @@ from .hotkeys import DEFAULT_HOTKEYS, GlobalHotkeys
 from .listener import DEFAULT_SPEECH_MODEL, SPEECH_MODELS, SystemAudioListener
 from .listener import supported as audio_supported
 from .prompts_view import PromptsView
+from . import screen_cues
 from .settings_dialog import SettingsDialog
 from .speech_filter import is_filler
 from .widgets import Composer, FlowLayout, LiveMarkdownView, scaled_font
@@ -131,6 +132,8 @@ HEARD_CONTEXT_CHARS = 1_500  # earlier transcript sent along with a spoken quest
 TRANSCRIPT_LINES_SHOWN = 80
 PARAGRAPH_SEP = chr(0x2029)  # QTextCursor.selectedText() uses this for line breaks
 CUT_TIMEOUT_MS = 600  # how long Ask waits for the listener to close the sentence being spoken
+CUE_MERGE_S = 30  # screen cues heard this close together go into the same notice (_check_screen_cue)
+CUE_LINES = 4  # the most heard lines a notice shows
 MAX_SYNTAX_ROUNDS = 2  # how often unparseable code is automatically sent back to the agent
 # A coding task's agent takes the task in at this effort, and its copies (understanding, how to solve it) work at
 # it: a copy shares the session's cache only at the same level. Measured: a copy at another level reads the whole
@@ -687,6 +690,8 @@ class MainWindow(QMainWindow):
         self._pending_action = None  # Ask/Send waiting for the listener to close the sentence being spoken
         self._fillers_skipped = 0
         self._audio_status_text = ""
+        self._cue: dict | None = None  # the screen notice that later cues add to (_check_screen_cue)
+        self._cues = 0  # screen notices so far: their ids
         # Replies of the coding session to "Send to agent" messages, shown in the chat:
         self._agent_replies: dict[str, MessageBubble] = {}  # message token -> bubble, until the agent picks it up
         self._replies_ready: deque[MessageBubble] = deque()  # picked up; the agent's next text is the reply
@@ -4665,9 +4670,51 @@ class MainWindow(QMainWindow):
         if text:
             # A sentence closed for an Ask/Send that already timed out was included in that message.
             self._tx.append([text, cut and self._pending_action is None])
+            self._check_screen_cue(text)
         self._schedule_transcript()
         if cut:
             self._finish_pending()
+
+    def _check_screen_cue(self, text: str) -> None:
+        """The interviewer pointed at the screen (screen_cues): a pasted question, a line, scrolling, a button to
+        press. The developer sees the screen only in the screenshots someone takes and cannot touch it, so a
+        person is told: on the remote page - with a button per monitor that takes the screenshot from there - and
+        in the status bar. Cues heard close together go into the same notice."""
+        kind = screen_cues.screen_cue(text)
+        if kind is None:
+            return
+        now = time.monotonic()
+        cue = self._cue
+        if cue is None or now - cue["at"] > CUE_MERGE_S:
+            self._cues += 1
+            cue = self._cue = {"id": self._cues, "kind": kind, "lines": [],
+                               "time": datetime.now().strftime("%H:%M:%S")}
+        cue["at"] = now
+        cue["lines"] = (cue["lines"] + [text])[-CUE_LINES:]
+        title = screen_cues.TITLES[cue["kind"]]
+        self._notice(f"👀 {title}: \"{text}\"", 15000)
+        remote = getattr(QApplication.instance(), "_remote_controller", None)
+        if remote is None or not remote.viewers:
+            return
+        if not getattr(remote, "_cues_wired", False):
+            remote.notice_action.connect(self._on_notice_action)
+            remote._cues_wired = True
+        count = len(QGuiApplication.screens())
+        actions = ([["screen:0", "🖥 Screenshot"]] if count == 1 else
+                   [[f"screen:{n}", f"🖥 Monitor {n + 1}"] for n in range(count)])
+        remote.notify({"id": cue["id"], "title": title, "lines": cue["lines"], "time": cue["time"],
+                       "note": "The AI developer cannot see or touch the screen: take a screenshot of it, or do "
+                               "it yourself.", "actions": actions})
+
+    def _on_notice_action(self, _notice: int, action: str) -> None:
+        """A button on a screen notice was pressed on the remote page: a screenshot of that monitor goes where
+        the next question's screenshots go. (Not through the Screen button: with several monitors that asks in a
+        menu on this PC, which the remote page does not show.)"""
+        kind, _, number = action.partition(":")
+        screens = QGuiApplication.screens()
+        if kind != "screen" or not number.isdigit() or int(number) >= len(screens):
+            return
+        self.capturer.start("full", self.status if self._directing() else self.ask, screens[int(number)])
 
     def _clear_transcript(self) -> None:
         """What was heard so far is gone: the next Ask sends only what is said from now on."""

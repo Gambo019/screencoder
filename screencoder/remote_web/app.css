@@ -229,6 +229,25 @@ img.k-canvas { display: block; touch-action: none; user-select: none; }
 #hud::before { content: '●'; margin-right: 5px; color: #f85149; }
 #hud.ok::before { color: #3fb950; }
 #hud.bad { bottom: auto; top: 10px; padding: 5px 14px; font-size: 13px; color: var(--text); border-color: #f85149; }
+/* ---- notices from the app (app.js showNote): over everything, the PC view included */
+#notes { position: fixed; top: 8px; left: 50%; transform: translateX(-50%); z-index: 90; display: flex;
+  flex-direction: column; gap: 6px; width: min(520px, calc(100vw - 16px)); pointer-events: none; }
+.note { pointer-events: auto; padding: 8px 10px; font-size: 13px; color: var(--text); background: var(--window);
+  border: 1px solid #e3b341; border-left-width: 4px; border-radius: 6px; box-shadow: 0 8px 24px #000000b0; }
+.note.pop { animation: note-pop .6s ease-out; }
+@keyframes note-pop { from { transform: translateY(-10px); box-shadow: 0 0 0 4px #e3b34199; } }
+.note-head { display: flex; align-items: center; gap: 8px; }
+.note-head b { flex: 1; color: #e3b341; }
+.note-time { font-size: 11px; color: var(--mid); }
+.note-x { font: inherit; color: var(--mid); background: none; border: none; padding: 0 2px; cursor: pointer; }
+.note-x:hover { color: var(--text); }
+.note-said { margin-top: 4px; font-style: italic; overflow-wrap: anywhere; }
+.note-hint { margin-top: 4px; font-size: 12px; color: var(--mid); }
+.note-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.note-actions button { font: inherit; font-size: 12px; color: var(--btext); background: var(--button);
+  border: 1px solid var(--line); border-radius: 4px; padding: 3px 10px; cursor: pointer; }
+.note-actions button:hover { border-color: var(--link); }
+.note-actions button:disabled { opacity: .7; cursor: default; }
 /* ---- the PC itself (pc.js): a picture of a monitor; what is done on it is done there */
 #pcbtn { position: fixed; left: calc(50% + 122px); bottom: 3px; z-index: 60; padding: 1px 9px; font: inherit;
   font-size: 11px; color: var(--mid); background: #0d1117d9; border: 1px solid var(--line); border-radius: 10px;

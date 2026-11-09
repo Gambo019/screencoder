@@ -136,14 +136,41 @@ WATCHING_ONLY = (
     "something 'above'."
 )
 
+# How much an answer says: judged from the question each time, never a fixed length. Answers to broad questions
+# ran to 400-600 words in a real interview (2026-11-07) - minutes of reading aloud, with the strongest points
+# buried and the interviewer kept from steering.
+ANSWER_SIZE = (
+    "How much you say follows the question, not the size of the topic. What you write is read out word for word, "
+    "at speaking pace, in a live conversation that the other person steers with their next question: every extra "
+    "sentence costs them time, and a long answer buries your best point. A narrow question gets a sentence or "
+    "two. For a broad one - what challenges you see, how you would design it, what else - choose: only the points "
+    "you would still make if you had just a moment, which is far fewer than you could list, strongest first, each "
+    "in one short sentence with its reason. The details, the examples and the other points wait until they ask. "
+    "Keep the sentences short and plain, not long chains held together by 'because' and 'so'. For instance, "
+    "asked what is hard about a chat app at scale: "
+    "“Three things stand out. Message order - messages pass through several servers, so I'd give each "
+    "conversation its own sequence numbers. Presence - online status changes constantly, so I'd keep it in "
+    "memory with heartbeats rather than in the database. And offline users - what they miss has to be stored and "
+    "synced when they come back.” Asked for more ('anything else?'), give the next one or two. No restating the "
+    "question, no recap of what you said before, no closing summary and no offer to go deeper: stop once it is "
+    "answered."
+)
+# The same, as a reminder at the end of each question (the instructions read last weigh most).
+ANSWER_SIZE_NOTE = (
+    "How much to say, if you answer it yourself: as much as this question needs and no more - it is read out "
+    "word for word. A narrow question: a sentence or two. A broad one: only the points you would still make if you "
+    "had just a moment - far fewer than you could list - in one short, plain sentence each with its reason; the "
+    "rest waits until they ask. No closing summary and no offer to go deeper."
+)
+
 # How chat replies should sound: like a person talking, not like a written report.
 TALK_STYLE = (
     "Speak like " + ENGINEER_VOICE + ". Talk directly to the person who asked, as 'you'. "
     "No headings, no bullet lists, no bold labels, and no announcing phrases such as 'Here is the "
     "breakdown', 'Specifically', 'In summary' or 'Let me explain'. If you need to look something up first, do "
-    "it silently - never say 'let me check' or describe what you are about to read. Answer what was asked and stop: a simple "
-    "question gets one to three sentences. Do not recap everything you did, and do not end with offers of more "
-    "help. Show code only when it is asked for or when a few lines say it better than words. " + WATCHING_ONLY
+    "it silently - never say 'let me check' or describe what you are about to read. " + ANSWER_SIZE + " Do not "
+    "recap everything you did, and do not end with offers of more help. Show code only when it is asked for or "
+    "when a few lines say it better than words. " + WATCHING_ONLY
 )
 
 # Kept on one line each: they are passed on the command line.
@@ -844,7 +871,7 @@ def design_request_prompt(text: str, said: str = "", leading: bool = True, minut
 step: do it.{shown} When it changes a diagram, say what you are adding or changing and why, then draw it - and \
 for more than a couple of boxes: {TALK_AND_DRAW} When it is all drawn, update your notes with tool calls only \
 and no words. {DESIGN_SPEECH} If it only asks something about the design - why, how, what if - answer it and \
-change nothing.{NEXT_RULE if leading else ""}{" Leave that line out while parts are still to come." if leading else ""}"""
+change nothing. {ANSWER_SIZE_NOTE}{NEXT_RULE if leading else ""}{" Leave that line out while parts are still to come." if leading else ""}"""
 
 
 DRAW_EXISTING = f"""\
@@ -1668,16 +1695,17 @@ def side_prompt(
             f"{_forward_rule(can_forward, 3 if moves_on else 2, queue, design)} ({4 if moves_on else 3}) Otherwise it "
             "is a question: answer it as "
             f"the developer doing this work, talking about it as your own: {FIRST_PERSON} Say it the way you "
-            "would say it out loud - the direct answer first, then your reasoning in a sentence or two if it "
-            "helps. Keep it short, and do not comment on how the question reached you."
+            "would say it out loud - the direct answer first, then only the reasoning that backs it. Do not "
+            "comment on how the question reached you."
         )
     else:
         parts.append(f"---\n# The user's question\n{question or '(see the attached images/files)'}")
         parts.append(f"{_move_on_rule(1, task is None) + ' ' if moves_on else ''}"
                      f"{_forward_rule(can_forward, 2 if moves_on else 1, queue, design)} Otherwise answer as the developer doing this work, the "
-                     f"way you would say it out loud, and keep it short. {FIRST_PERSON}")
+                     f"way you would say it out loud. {FIRST_PERSON}")
     if attachments:
         parts.append(f"Attached with the question:\n{attachments}")
+    parts.append(ANSWER_SIZE_NOTE)
     if given and pending:
         # Said last: it is the one thing an answer must not get wrong.
         parts.append("Keep in mind: you are still in the middle of this work. Nothing of it is finished, fixed or "

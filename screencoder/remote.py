@@ -1870,6 +1870,7 @@ class RemoteController(QObject):
     """The listening side: serves the page, accepts viewers that know the key, passes messages both ways."""
 
     changed = Signal()  # started, stopped, or a viewer came or went
+    notice_action = Signal(int, str)  # a button on a notice (notify) was pressed on a page: its id, its action
 
     def __init__(self, app, window):
         super().__init__(app)
@@ -1965,6 +1966,12 @@ class RemoteController(QObject):
         if self.internet:
             return f"{self.tunnel.url}/#k={self._key}" if self.tunnel.url else ""
         return remote_link(self.port, self._key, host)
+
+    def notify(self, notice: dict) -> None:
+        """A notice that pops up on every viewer's page, over everything, until it is dismissed there:
+        {"id", "title", "lines": [quoted lines], "time", "note", "actions": [[action, button label], ...]}. A
+        notice with the id of one still shown replaces it. A pressed button comes back as notice_action."""
+        self._broadcast(["N", notice])
 
     def status(self) -> str:
         if self.error:
@@ -2109,6 +2116,10 @@ class RemoteController(QObject):
             return
         if isinstance(message[0], str) and message[0].startswith("pc"):  # the PC itself, not the app
             self.pc.handle(client, message)
+            return
+        if message[0] == "nt":  # a button on a notice (notify)
+            if len(message) >= 3 and type(message[1]) is int and isinstance(message[2], str):
+                self.notice_action.emit(message[1], message[2][:40])
             return
         self.mirror.command(client, message)
 

@@ -137,6 +137,56 @@ function onMessage(ev) {
   else if (m[0] === 'A') { const n = N.get(m[1]); if (n) n.ack = Math.max(n.ack || 0, m[2]); }
   else if (m[0] === 'M') snipAnswer(m[2]);
   else if (m[0] === 'PC' && window.pcAnswer) window.pcAnswer(m[1]);  // the PC itself: pc.js
+  else if (m[0] === 'N') showNote(m[1]);
+}
+
+// ---- notices from the app (RemoteController.notify): a card over everything until the viewer dismisses it.
+// They are not part of the mirrored window, so a reconnect keeps them.
+
+const NOTES_MAX = 3;
+const notesEl = document.body.appendChild($('div'));
+notesEl.id = 'notes';
+let pageTitle = document.title;  // the app window's title, once it is known (placeRoots)
+
+function showNote(note) {
+  let card = notesEl.querySelector(`[data-id="${Number(note.id)}"]`);
+  const fresh = !card;
+  if (fresh) { card = $('div', 'note'); card.dataset.id = Number(note.id); }
+  const head = $('div', 'note-head'), title = $('b'), time = $('span', 'note-time'), close = $('button', 'note-x');
+  title.textContent = note.title || 'Notice';
+  time.textContent = note.time || '';
+  close.type = 'button'; close.textContent = '✕'; close.title = 'Dismiss';
+  close.addEventListener('click', () => { card.remove(); flagTitle(); });
+  head.append(title, time, close);
+  card.replaceChildren(head);
+  for (const line of note.lines || []) {
+    const said = $('div', 'note-said');
+    said.textContent = `“${line}”`;
+    card.append(said);
+  }
+  if (note.note) { const hint = $('div', 'note-hint'); hint.textContent = note.note; card.append(hint); }
+  const row = $('div', 'note-actions');
+  for (const [action, label] of note.actions || []) {
+    const b = $('button');
+    b.type = 'button'; b.textContent = label;
+    b.addEventListener('click', () => {
+      cmd(['nt', Number(note.id), action]);
+      b.disabled = true; b.textContent = '✓ ' + label;
+      setTimeout(() => { b.disabled = false; b.textContent = label; }, 1500);  // another one after scrolling
+    });
+    row.append(b);
+  }
+  if (row.childElementCount) card.append(row);
+  if (fresh) notesEl.prepend(card);
+  while (notesEl.childElementCount > NOTES_MAX) notesEl.lastElementChild.remove();
+  card.classList.remove('pop'); void card.offsetWidth; card.classList.add('pop');  // noticed even when updated
+  flagTitle();
+}
+
+// The tab's title counts the open notices, so they show from another tab too.
+function flagTitle() {
+  const open = notesEl.childElementCount;
+  document.title = open ? `(${open}) 👀 ${pageTitle}` : pageTitle;
 }
 
 function reset() {
@@ -1288,7 +1338,8 @@ function frame(n) {
 function placeRoots() {
   const main = N.get(roots[0]);
   if (main && main.el.parentNode !== rootEl) rootEl.replaceChildren(main.el);
-  document.title = (main && main.p.wt) || meta.title || 'Remote';
+  pageTitle = (main && main.p.wt) || meta.title || 'Remote';
+  flagTitle();
   const want = [], picks = [];
   for (const id of roots.slice(1)) {
     const n = N.get(id);
