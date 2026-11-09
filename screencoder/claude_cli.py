@@ -118,6 +118,10 @@ class ClaudeSession(QObject):
             "--model", self.model,
             # Nobody can answer permission prompts in this app: anything that would prompt is denied.
             "--permission-prompts", "none",
+            # No MCP servers: the CLI otherwise connects the account's claude.ai connectors (Google Drive, Docs...)
+            # to every session - their tools then reached the quick answers (24 of them, measured), longer
+            # requests for nothing and a way into the person's own files that this app never asked for.
+            "--strict-mcp-config",
         ]
         if self.effort:
             args += ["--effort", self.effort]
